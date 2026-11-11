@@ -58,3 +58,4 @@ set_location_assignment PIN_114 -to uart_tx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
 set_location_assignment PIN_115 -to uart_rx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
+
