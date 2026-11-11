@@ -1,0 +1,60 @@
+# Pin assignments selected from cyclone_iv_board_v3.qsf.
+# Clock, switches, LEDs and UART TX match FPGA-UART-TX/UART_TX.qsf.
+set_global_assignment -name FAMILY "Cyclone IV E"
+set_global_assignment -name DEVICE EP4CE6E22C8
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_OE OFF
+set_global_assignment -name TOP_LEVEL_ENTITY uart_switch_demo
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name SDC_FILE uart_switch_demo.sdc
+set_global_assignment -name VERILOG_FILE uart_switch_demo.v
+set_global_assignment -name VERILOG_FILE my_uart_rx.v
+set_global_assignment -name VERILOG_FILE my_uart_tx.v
+set_global_assignment -name VERILOG_FILE speed_select.v
+set_location_assignment PIN_23 -to clk_50mhz
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to clk_50mhz
+set_location_assignment PIN_25 -to reset_n
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to reset_n
+set_location_assignment PIN_88 -to {key_n[0]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {key_n[0]}
+set_location_assignment PIN_89 -to {key_n[1]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {key_n[1]}
+set_location_assignment PIN_87 -to {led_n[0]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[0]}
+set_location_assignment PIN_86 -to {led_n[1]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[1]}
+set_location_assignment PIN_85 -to {led_n[2]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[2]}
+set_location_assignment PIN_84 -to {led_n[3]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[3]}
+set_location_assignment PIN_133 -to {digit_n[0]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[0]}
+set_location_assignment PIN_135 -to {digit_n[1]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[1]}
+set_location_assignment PIN_136 -to {digit_n[2]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[2]}
+set_location_assignment PIN_137 -to {digit_n[3]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[3]}
+set_location_assignment PIN_128 -to {seg_n[0]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[0]}
+set_location_assignment PIN_121 -to {seg_n[1]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[1]}
+set_location_assignment PIN_125 -to {seg_n[2]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[2]}
+set_location_assignment PIN_129 -to {seg_n[3]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[3]}
+set_location_assignment PIN_132 -to {seg_n[4]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[4]}
+set_location_assignment PIN_126 -to {seg_n[5]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[5]}
+set_location_assignment PIN_124 -to {seg_n[6]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[6]}
+set_location_assignment PIN_127 -to {seg_n[7]}
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[7]}
+set_location_assignment PIN_114 -to uart_tx
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
+set_location_assignment PIN_115 -to uart_rx
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
