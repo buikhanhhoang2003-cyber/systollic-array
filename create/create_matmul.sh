@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tạo project UART ba mode, gồm nhân ma trận từ nội dung nhúng; cần Bash và các lệnh coreutils.
+# Tạo project UART ba mode và GUI PyQt từ nội dung nhúng; cần Bash và các lệnh coreutils.
 # Cách dùng: bash create_matmul.sh [thư_mục_đích]
 # Đích mặc định: ./matmul. Thư mục cha phải tồn tại; đích phải chưa tồn tại.
 set -euo pipefail
@@ -665,12 +665,15 @@ python -m pip install -r requirements-gui.txt
 python matrix_gui.py
 ```
 
-1. Đóng terminal serial khác đang dùng cùng adapter. Chọn cổng trong danh
+1. Bật riêng **DIP3** trước khi kết nối. Đóng terminal serial khác đang dùng
+   cùng adapter. Chọn cổng trong danh
    sách hoặc gõ trực tiếp `/dev/ttyUSB0`, `/dev/ttyACM0` hay `COM3`, rồi bấm
    **Kết nối**. UART cố định **9600, 8N1, không flow control**.
    Nếu gặp Permission denied, kiểm tra quyền truy cập thiết bị serial của tài khoản.
-2. Bật riêng **DIP3**, nhấn/nhả RESET trên board **sau khi kết nối**.
-   Đợi dòng trạng thái **FPGA READY**; khi đó nút gửi mới được bật.
+2. Ứng dụng tự đồng bộ với FPGA sau khi kết nối. Đợi dòng trạng thái
+   **FPGA READY**; khi đó nút **Gửi FPGA và đối chiếu** mới được bật.
+   Nếu bật DIP3 sau khi đã kết nối hoặc cần thử lại, bấm **Đồng bộ FPGA**.
+   Không cần nhận lại thông báo READY lúc board mới khởi động.
 3. Chọn **m, k, n** từ 1–8: A m×k, B k×n, C m×n. Nhập mỗi hàng một dòng,
    cách các số bằng dấu cách hoặc Tab. Các phần tử thuộc **−32768…32767**.
    Thay kích thước giữ nguyên văn bản đang nhập; sửa lại số hàng/cột cho khớp.
@@ -689,9 +692,24 @@ ma trận **và `READY` cuối**. Nhật ký hiển thị TX/RX để đối chi
 Ứng dụng chỉ gửi một yêu cầu tại một thời điểm và khóa ô nhập trong lúc chờ.
 UART được đọc không chặn bằng QTimer; dữ liệu gửi thành từng phần nhỏ.
 
+Nút gửi bị mờ có nghĩa là chưa kết nối, đang đồng bộ hoặc đang chờ phép tính.
+Ứng dụng đồng bộ bằng lệnh `M 0` kèm LF. Với HDL hiện tại, kích thước 0
+không hợp lệ nên FPGA trả `ERR` rồi `READY`; cặp phản hồi này xác nhận UART
+và đưa parser FPGA về trạng thái chờ lệnh mới. **ERR ở riêng bước đồng bộ
+là phản hồi dự kiến**, không phải lỗi phép nhân. Thao tác đồng bộ hủy dữ liệu
+ma trận nhập dở trên board; không cho đồng bộ khi ứng dụng đang chờ phép nhân.
+Không cần sửa HDL hoặc biên dịch lại SOF chỉ để áp dụng sửa lỗi GUI này.
+
+Nếu sau 5 giây không nhận đủ cặp phản hồi, ứng dụng báo lỗi đồng bộ và cho
+thử lại. Nhật ký chỉ có dòng Kết nối/TX mà không có RX: kiểm tra board đang
+chạy SOF có mode DIP3, DIP3 đã ON, đúng adapter và dây **FPGA TX 114 → RX
+adapter, FPGA RX 24 ← TX adapter**, cùng GND. Chọn đúng cổng và giữ 9600 8N1.
+Nếu FPGA đang xuất một kết quả từ phiên trước, chờ xong rồi bấm Đồng bộ FPGA.
+
 Nếu FPGA trả `ERR`, phản hồi không hợp lệ hoặc hết 15 giây, ứng dụng báo
-phép tính thất bại. Bật riêng DIP3 rồi nhấn RESET để nhận `READY` mới trước
-khi thử lại. Rút adapter hoặc ngắt kết nối hủy yêu cầu đang chờ. Nút RESET
+phép tính thất bại. Bật riêng DIP3 rồi bấm **Đồng bộ FPGA** trước khi thử lại.
+Nếu vẫn không có phản hồi, nhấn RESET trên board rồi thử đồng bộ lại.
+Rút adapter hoặc ngắt kết nối hủy yêu cầu đang chờ. Nút RESET
 trên board vẫn cần thao tác tay; UART không có lệnh reset phần cứng.
 
 File có kiểm tra nhỏ cho xử lý số, phép nhân, định dạng gửi và parser nhận
@@ -1593,6 +1611,12 @@ class ResultParser:
         self.expected_shape = None
         self.shape = None
         self.rows = []
+        self.syncing = False
+        self.sync_error_seen = False
+
+    def synchronize(self):
+        self.reset()
+        self.syncing = True
 
     def begin(self, rows, cols):
         self.reset()
@@ -1608,6 +1632,14 @@ class ResultParser:
             self.buffer = bytearray(remaining)
             line = line.rstrip(b"\r").decode("ascii").strip()
             if not line:
+                continue
+            if self.syncing:
+                # M 0 intentionally rejects a zero dimension: its reply is ERR then READY.
+                if line == "ERR":
+                    self.sync_error_seen = True
+                elif line == "READY" and self.sync_error_seen:
+                    self.syncing = False
+                    events.append(("ready", None))
                 continue
             if line == "READY":
                 if self.expected_shape is not None:
@@ -1681,6 +1713,14 @@ def self_check():
     parser.begin(1, 1)
     assert parser.feed(b"ERR\r\nREADY\r\n") == [
         ("error", "FPGA trả ERR: dữ liệu bị từ chối."), ("ready", None)]
+    parser.synchronize()
+    assert parser.feed(b"READY\r\nC 1 1\r\n123\r\nREADY\r\nER") == []
+    assert parser.syncing
+    assert parser.feed(b"R\r\nREA") == []
+    assert parser.feed(b"DY\r\n") == [("ready", None)]
+    assert not parser.syncing
+    parser.begin(1, 1)
+    assert parser.feed(b"C 1 1\n0\nREADY\n") == [("result", [[0]]), ("ready", None)]
     print("PASS: matrix validation, signed multiplication, UART framing and result parser.")
 
 
@@ -1725,15 +1765,17 @@ def main():
             self.port_box.setMinimumWidth(200)
             self.refresh_button = QPushButton("Quét cổng")
             self.connect_button = QPushButton("Kết nối")
+            self.sync_button = QPushButton("Đồng bộ FPGA")
             connection.addWidget(QLabel("Cổng UART:"))
             connection.addWidget(self.port_box, 1)
             connection.addWidget(self.refresh_button)
             connection.addWidget(self.connect_button)
+            connection.addWidget(self.sync_button)
             connection.addWidget(QLabel("9600 baud · 8N1 · Flow control None"))
             layout.addLayout(connection)
             layout.addWidget(QLabel(
                 "Bật riêng DIP3; LED nhỏ PIN_85 sáng, LED 7 đoạn tắt. "
-                "Kết nối UART rồi nhấn RESET trên board để nhận READY."))
+                "Ứng dụng tự đồng bộ sau khi kết nối; có thể bấm Đồng bộ FPGA để thử lại."))
             self.status = QLabel("Chưa kết nối. Có thể tính bằng Python khi chưa có board.")
             self.status.setWordWrap(True)
             layout.addWidget(self.status)
@@ -1793,6 +1835,7 @@ def main():
 
             self.refresh_button.clicked.connect(self.refresh_ports)
             self.connect_button.clicked.connect(self.toggle_connection)
+            self.sync_button.clicked.connect(self.synchronize_fpga)
             self.python_button.clicked.connect(self.calculate)
             self.send_button.clicked.connect(self.send_request)
             self.sample2.clicked.connect(lambda: self.load_sample(2))
@@ -1854,7 +1897,18 @@ def main():
             self.port_box.setEnabled(not connected)
             self.refresh_button.setEnabled(not connected)
             self.connect_button.setText("Ngắt kết nối" if connected else "Kết nối")
+            self.sync_button.setEnabled(connected and not self.pending and not self.parser.syncing)
             self.send_button.setEnabled(connected and self.ready and not self.pending)
+            if not connected:
+                self.send_button.setToolTip("Chọn cổng UART rồi bấm Kết nối.")
+            elif self.pending:
+                self.send_button.setToolTip("Đang chờ phép nhân hiện tại hoàn tất, tối đa 15 giây.")
+            elif self.parser.syncing:
+                self.send_button.setToolTip("Đang chờ FPGA phản hồi bước đồng bộ, tối đa 5 giây.")
+            elif not self.ready:
+                self.send_button.setToolTip("Bật riêng DIP3 rồi bấm Đồng bộ FPGA; xem nhật ký RX nếu không phản hồi.")
+            else:
+                self.send_button.setToolTip("Gửi ma trận và đối chiếu với kết quả Python.")
             for widget in (self.a_text, self.b_text, self.m, self.k, self.n,
                            self.sample2, self.sample8, self.python_button):
                 widget.setEnabled(not self.pending)
@@ -1876,10 +1930,24 @@ def main():
             except (OSError, ValueError, serial.SerialException) as exc:
                 QMessageBox.warning(self, "Không kết nối được UART", str(exc))
                 return
-            self.parser.reset()
-            self.ready = False
-            self.status.setText("Đã kết nối. Bật riêng DIP3 rồi nhấn RESET trên board; đang chờ READY.")
             self.log.appendPlainText(f"Kết nối {port}: 9600 8N1.")
+            self.synchronize_fpga()
+
+        def synchronize_fpga(self):
+            if self.serial_port is None or self.pending or self.parser.syncing:
+                return
+            try:
+                self.serial_port.reset_input_buffer()
+            except (OSError, serial.SerialException) as exc:
+                self.disconnect_port(f"Lỗi UART: {exc}. Kiểm tra adapter rồi kết nối lại.")
+                return
+            self.parser.synchronize()
+            self.ready = False
+            # Existing HDL accepts M while idle/input; dimension 0 requests a known error reply.
+            self.tx_queue = b"M 0\n"
+            self.deadline = time.monotonic() + 5.0
+            self.status.setText("Đang đồng bộ FPGA (tối đa 5 giây). Bật riêng DIP3 trên board.")
+            self.log.appendPlainText("TX đồng bộ: M 0\\n (chờ ERR rồi READY; hủy dữ liệu nhập dở).")
             self.update_controls()
 
         def disconnect_port(self, message):
@@ -1931,7 +1999,7 @@ def main():
                 except (OSError, serial.SerialException) as exc:
                     self.disconnect_port(f"Lỗi UART: {exc}")
                     return
-            self.status.setText(message + " Bật riêng DIP3 và nhấn RESET trên board để nhận READY mới.")
+            self.status.setText(message + " Bật riêng DIP3 rồi bấm Đồng bộ FPGA. Nếu vẫn lỗi, nhấn RESET và thử lại.")
             self.comparison.setText("Phép tính thất bại; chưa có kết quả để đối chiếu.")
             self.log.appendPlainText("LỖI: " + message)
             self.update_controls()
@@ -1976,7 +2044,11 @@ def main():
                 if self.tx_queue:
                     written = self.serial_port.write(self.tx_queue[:16])
                     self.tx_queue = self.tx_queue[written:]
-                if self.pending and time.monotonic() > self.deadline:
+                if self.parser.syncing and time.monotonic() > self.deadline:
+                    self.protocol_error(
+                        "Không nhận được ERR/READY sau 5 giây. "
+                        "Kiểm tra đúng cổng, SOF có mode DIP3, dây TX/RX và GND.")
+                elif self.pending and time.monotonic() > self.deadline:
                     self.protocol_error("Hết 15 giây mà chưa nhận đủ kết quả và READY.")
             except (OSError, serial.SerialException) as exc:
                 self.disconnect_port(f"Lỗi UART: {exc}. Kiểm tra adapter rồi kết nối lại.")
@@ -2009,3 +2081,4 @@ printf 'DIP3 ON (PIN_90): nhân ma trận 1-8, signed 16 bit; chờ READY rồi 
 printf 'Sau biên dịch, xem output_files/matmul.pin: DIG1=133, segment a=128, 3.3-V LVTTL, User Assignment=Y.\n'
 printf 'Ví dụ 8x8 để copy/paste: %s/UART_MATRIX_EXAMPLE.md\n' "$destination"
 printf 'Ứng dụng PC: %s/matrix_gui.py (cài requirements-gui.txt; xem README).\n' "$destination"
+printf 'GUI tự đồng bộ khi kết nối; bật DIP3 trước, chờ FPGA READY rồi gửi ma trận.\n'
