@@ -1,2 +1,3 @@
 QUARTUS_VERSION = "21.1"
 PROJECT_REVISION = "uart_switch_demo"
+
