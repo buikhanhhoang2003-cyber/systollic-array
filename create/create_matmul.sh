@@ -85,7 +85,8 @@ module matmul (
     // Small onboard LEDs are active low: PIN_87 = TX mode, PIN_86 = RX mode.
     assign led_n[0] = reset_sync ? mode_rx : 1'b1;
     assign led_n[1] = reset_sync ? !mode_rx : 1'b1;
-    assign led_n[3:2] = 2'b11;
+    assign led_n[2] = 1'b1; // PIN_85: unused LED stays off.
+    assign led_n[3] = 1'b1; // PIN_84: unused LED stays off.
 
     uart_tx u_tx (
         .clk(clk_50mhz),
@@ -107,26 +108,17 @@ module matmul (
         .valid(rx_valid)
     );
 
-    reg [15:0] digits;
-    reg new_number;
+    reg [3:0] digit;
     always @(posedge clk_50mhz or negedge reset_sync) begin
         if (!reset_sync) begin
-            digits <= 16'h0000;
-            new_number <= 1'b0;
+            digit <= 4'd0;
         end else if (!mode_rx) begin
-            digits <= 16'h0000;
-            new_number <= 1'b0;
+            digit <= 4'd0;
         end else if (rx_valid) begin
             if (rx_data >= 8'h30 && rx_data <= 8'h39) begin
-                if (new_number)
-                    digits <= {12'h000, rx_data[3:0]};
-                else
-                    digits <= {digits[11:0], rx_data[3:0]};
-                new_number <= 1'b0;
-            end else if (rx_data == 8'h0d || rx_data == 8'h0a) begin
-                new_number <= 1'b1;
+                digit <= rx_data[3:0];
             end else if (rx_data == 8'h08 || rx_data == 8'h7f) begin
-                digits <= {4'h0, digits[15:4]};
+                digit <= 4'd0;
             end
         end
     end
@@ -135,7 +127,7 @@ module matmul (
         .clk(clk_50mhz),
         .reset_n(reset_sync),
         .enable(mode_rx),
-        .digit(digits[3:0]),
+        .digit(digit),
         .digit_n(digit_n),
         .seg_n(seg_n)
     );
@@ -311,6 +303,7 @@ module sevenseg_scan (
     output reg  [7:0] seg_n
 );
     reg [7:0] segments;
+    reg [8:0] blank_count;
 
     always @* begin
         // {dp,g,f,e,d,c,b,a}, common anode; decimal point stays off.
@@ -331,15 +324,27 @@ module sevenseg_scan (
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
+            blank_count <= 9'd0;
             digit_n <= 4'b1111;
             seg_n <= 8'hff;
         end else if (!enable) begin
+            blank_count <= 9'd0;
             digit_n <= 4'b1111;
             seg_n <= 8'hff;
-        end else begin
-            // V2.1 schematic: the leftmost digit is DIG4, on PIN_137.
-            digit_n <= 4'b0111;
-            seg_n <= segments;
+        end else if (digit_n != 4'b1111 && seg_n != segments) begin
+            digit_n <= 4'b1111;
+            blank_count <= 9'd0;
+        end else if (digit_n == 4'b1111) begin
+            // Allow the PNP driver to turn off before changing shared segments.
+            if (blank_count == 9'd249)
+                seg_n <= segments;
+            if (blank_count == 9'd499) begin
+                // DIG1 / PIN_133 follows dig[0] in the vendor examples.
+                digit_n <= 4'b1110;
+                blank_count <= 9'd0;
+            end else begin
+                blank_count <= blank_count + 1'b1;
+            end
         end
     end
 endmodule
@@ -363,6 +368,8 @@ set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
 set_global_assignment -name VERILOG_FILE rtl/sevenseg_scan.v
 set_global_assignment -name SDC_FILE matmul.sdc
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+# Keep the legacy setting used by the vendor projects at the same value.
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "AS INPUT TRI-STATED"
 set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
 # LED pins 86/87 are also DEV_OE/DEV_CLRn.
 set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
@@ -390,7 +397,7 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[2]}
 set_location_assignment PIN_84 -to {led_n[3]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[3]}
 
-# DIG1..DIG4; schematic order from right to left.
+# DIG1..DIG4, as in sled.qsf. Only DIG1/PIN_133 is enabled by the HDL.
 set_location_assignment PIN_133 -to {digit_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[0]}
 set_location_assignment PIN_135 -to {digit_n[1]}
@@ -482,6 +489,7 @@ def main():
     assert globals_["TOP_LEVEL_ENTITY"] == "matmul"
     assert globals_["VERILOG_INPUT_VERSION"] == "VERILOG_2001"
     assert globals_["RESERVE_ALL_UNUSED_PINS"] == "AS INPUT TRI-STATED"
+    assert globals_["RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP"] == "AS INPUT TRI-STATED"
     assert globals_["ENABLE_DEVICE_WIDE_RESET"] == "OFF"
     assert globals_["ENABLE_DEVICE_WIDE_OE"] == "OFF"
     revision = re.search(r'PROJECT_REVISION\s*=\s*"([^"]+)"',
@@ -526,26 +534,28 @@ Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**, Verilog-2001.
 Mở **`matmul.qpf`** bằng Quartus Prime Lite 21.1; revision và top-level đều
 là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 
-Theo yêu cầu hiện tại, chỉ **digit đầu tiên bên trái** của cụm LED 7 đoạn
+Theo ví dụ board, chỉ **DIG1/PIN_133 (`dig[0]` trong `sled.qsf`)** của cụm LED 7 đoạn
 hiển thị số; ba digit còn lại luôn tắt. LED báo mode là **LED nhỏ LED1/PIN_87
 cho mode 1 và LED2/PIN_86 cho mode 2 trên board**, tách biệt với cụm LED
 7 đoạn. Cả hai sáng ở mức 0; trong reset cả hai tắt. LED3/LED4 luôn tắt.
-Một digit chỉ hiện hàng đơn vị:
-nhập `1234` thì thấy `4`, nhập tiếp `5` thì thấy `5`.
+Mỗi lần nhập một chữ số **0–9** qua terminal, digit 7 đoạn hiển thị ngay
+đúng chữ số đó: nhập `7` thì hiện `7`, nhập tiếp `2` thì thay bằng `2`.
+Ban đầu hiện `0`; không cần nhấn Enter để cập nhật.
 
 ## Các file
 
 | File | Chức năng |
 |---|---|
-| `rtl/matmul.v` | Top-level, đồng bộ reset/DIP, chống dội, chọn mode, xử lý số |
+| `rtl/matmul.v` | Top-level, đồng bộ reset/DIP, chống dội, chọn mode, giữ một chữ số 0–9 |
 | `rtl/uart_tx.v` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
 | `rtl/uart_rx.v` | Đồng bộ RX hai FF, xác nhận start, lấy mẫu giữa bit, kiểm tra stop |
-| `rtl/sevenseg_scan.v` | Giải mã một chữ số, chỉ bật digit đầu tiên bên trái |
+| `rtl/sevenseg_scan.v` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
 | `check_project.py` | Tự kiểm tra tĩnh cổng/chân, I/O, device và file nguồn |
 
-Chưa thêm testbench theo yêu cầu hiện tại. QSF chỉ đưa bốn file HDL trong
+Không kèm testbench trong project theo yêu cầu hiện tại. Đã dùng kiểm tra
+mô phỏng tạm thời cho lần sửa lỗi hiển thị; QSF chỉ đưa bốn file HDL trong
 `rtl/` vào tổng hợp.
 
 ## Tạo lại project bằng một file shell
@@ -604,7 +614,8 @@ Chưa có phép đo hoặc kiểm tra phần cứng thực tế trong lần sử
 ## Chân và cực tính
 
 Tất cả 21 chân dùng **3.3-V LVTTL**, không trùng chân. Các chân không dùng
-được đặt **AS INPUT TRI-STATED**. Các chức năng DEV_OE/DEV_CLRn của chân
+được đặt **AS INPUT TRI-STATED**, gồm cả khóa legacy như các QSF ví dụ vendor.
+Các chức năng DEV_OE/DEV_CLRn của chân
 86/87 bị tắt để sử dụng LED.
 
 | Cổng HDL | Chức năng | Chân FPGA |
@@ -634,15 +645,18 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
    so với bảng chân; project theo bảng chân và ví dụ vendor, không theo tên
    net LED của schematic. Nếu số in trên PCB khác, đổi riêng bốn location
    assignment của `led_n` sau khi thử từng LED.
+   Trên schematic V2.1, R30/R31/R32/R33 lần lượt nối các net LED4/LED3/LED2/LED1,
+   và khối P3 nối các net đó với PIN_87/86/85/84. Vì vậy tên R33 không đồng
+   nghĩa LED1/PIN_87 trong bảng chân. Chưa xác minh thứ tự điện trở trên PCB V3.0.
 4. Khối “Digital Tube” vẽ **DIG1 → Q1 → D4 (chân 6 của cụm hiển thị)**,
    **DIG2 → Q2 → D3 (chân 8)**, **DIG3 → Q3 → D2 (chân 9)**,
    **DIG4 → Q4 → D1 (chân 12)**. Vì vậy dùng thứ tự trái sang phải
    **DIG4, DIG3, DIG2, DIG1 = 137, 136, 135, 133**.
-   Project chỉ bật **DIG4/PIN_137**, tức `digit_n[3] = 0`, để dùng digit
-   đầu tiên bên trái. DIG1–DIG3 luôn tắt. Đây là vị trí theo schematic V2.1,
-   chưa xác nhận bằng board V3.0 thực tế. Nếu digit mong muốn trên PCB thực
-   tế là DIG1/PIN_133, đổi `digit_n <= 4'b0111` thành `4'b1110` trong
-   `rtl/sevenseg_scan.v`; không đổi chân segment. Nếu thay đổi gán chân QSF,
+   Bản sửa hiện tại dùng **DIG1/PIN_133**, tức `digit_n = 4'b1110`, đúng chỉ số
+   `dig[0]` trong ví dụ `sled.qsf`; DIG2–DIG4 luôn tắt. Trên sơ đồ V2.1,
+   DIG1 nằm bên phải; chưa xác nhận vị trí thực tế trên PCB V3.0. Bản trước
+   chọn DIG4 theo giả định "đầu tiên bên trái"; nay dùng tên DIG1 của board.
+   Không đổi chân segment. Nếu thay đổi gán chân QSF,
    cập nhật bảng kỳ vọng tương ứng trong `check_project.py`.
 5. `../FPGA-UART-TX/UART_TX.qsf` và `README.md` xác nhận clock chân 23,
    TX chân 114 và ví dụ dùng 5208 clock/bit. Mã ví dụ không được sao chép
@@ -650,16 +664,35 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
 6. `Cyclone IV chip/EP4CE6 pin information.pdf`: chân E144 86/87 có chức
    năng tùy chọn DEV_OE/DEV_CLRn; chúng được tắt trong QSF.
    `Dev Board Manual.pdf` yêu cầu các chân chưa dùng ở trạng thái tri-state.
+7. `Peripheral control 06 Digital tube static control/sled/sled.v` xác nhận
+   mã segment 0–9 là C0, F9, A4, B0, 99, 92, 82, F8, 80, 90; `dig=0000`
+   trong ví dụ bật cả bốn digit. Project này chỉ cho phép `1110` hoặc `1111`,
+   giữ DIG2–DIG4 tắt. `Peripheral control 16 .../SEG_D.v` cũng dùng mã active-low
+   và chọn từng digit bằng `1110`, `1101`, `1011`.
 
 DIP1 và KEY1 cùng chân 88. Không có chức năng KEY1 độc lập; khi DIP1 OFF,
 nhấn giữ KEY1 cũng có thể yêu cầu mode 1 sau thời gian chống dội.
+
+Giá trị cần thấy ở **các chân FPGA** sau khi chống dội:
+
+| Trạng thái | PIN_87 | PIN_86 | PIN_85 | PIN_84 | Chọn digit |
+|---|---|---|---|---|---|
+| Giữ RESET | 1 | 1 | 1 | 1 | `1111`, tắt hết |
+| Mode 1, DIP1 ON | 0 | 1 | 1 | 1 | `1111`, tắt hết |
+| Mode 2, DIP1 OFF | 1 | 0 | 1 | 1 | `1110`, chỉ DIG1; `1111` trong khoảng tắt |
+
+PIN_85/PIN_84 được xuất mức 1 tường minh, không để tri-state. Mô phỏng đã
+kiểm tra chúng luôn bằng 1; chưa xác định được nguyên nhân phần cứng khiến
+bạn thấy ba LED nhỏ sáng. Nếu hiện tượng vẫn còn sau khi nạp SOF mới,
+đối chiếu chân trong Pin Planner/Fitter report và đo mức ở PIN_84–87
+(hoặc điểm mở rộng tương ứng) trước khi đổi cực tính hay gán chân.
 
 ## Hành vi
 
 | DIP1 ổn định | LED nhỏ trên board | UART | LED 7 đoạn |
 |---|---|---|---|
 | ON = 0, mode 1 | LED1 sáng; LED2–4 tắt | Gửi `AAAAAA…`, không CR/LF | Tắt cả digit và segment |
-| OFF = 1, mode 2 | LED2 sáng; LED1/3/4 tắt | TX idle = 1, nhận RX, không echo | Digit đầu tiên hiện `0`, cập nhật chữ số hàng đơn vị; ba digit còn lại tắt |
+| OFF = 1, mode 2 | LED2 sáng; LED1/3/4 tắt | TX idle = 1, nhận RX, không echo | Digit đầu tiên hiện `0`, mỗi số 0–9 nhận được thay số đang hiện; ba digit còn lại tắt |
 
 Sau hai FF đồng bộ, DIP phải khác mode yêu cầu liên tục **1.000.000 clock
 = 20 ms** mới được chấp nhận. Khi chuyển từ mode 1 sang mode 2, TX hoàn tất
@@ -668,19 +701,13 @@ frame đang chạy trước khi LED2 sáng và mode 2 có hiệu lực; độ tr
 
 Quy tắc nhập trong mode 2:
 
-- Chỉ ASCII `0`…`9` được ghép vào số. Vẫn giữ bốn chữ số cuối trong bộ nhớ
-  để Backspace/Delete khôi phục chữ số trước, nhưng chỉ hiển thị hàng đơn vị.
-  `1234` → hiện `4`, nhập tiếp `5` → hiện `5` (bộ nhớ lần lượt `1234`, `2345`).
-- CR (`0x0D`), LF (`0x0A`) hoặc CRLF giữ số hiện tại và đánh dấu số mới.
-  `1234`, Enter → vẫn hiện `4`; nhập `5` → hiện `5` (bộ nhớ `0005`).
-  Enter liên tiếp cũng giữ nguyên số.
-- Backspace (`0x08`) hoặc Delete (`0x7F`) dịch phải một chữ số,
-  thêm 0 bên trái: bộ nhớ `1234` → `0123` → `0012`, hiển thị `4` → `3` → `2`.
-  Enter vẫn đánh dấu số mới cho đến chữ số tiếp theo, kể cả nếu xen
-  Backspace/Delete hoặc ký tự bị bỏ qua.
-- Ký tự khác bị bỏ qua; dấu âm và dấu thập phân không được diễn giải.
-  Ví dụ `-1.2` chỉ có hai chữ số hợp lệ, bộ nhớ `0012`, hiển thị `2`.
-- Vào mode 1 xóa số và trạng thái Enter; trở lại mode 2 hiện `0`.
+- Chỉ nhận ASCII `0`…`9`. Mỗi số mới thay trực tiếp số đang hiển thị:
+  nhập `7` → hiện `7`, nhập tiếp `2` → hiện `2`.
+- CR (`0x0D`), LF (`0x0A`) hoặc CRLF giữ số hiện tại. Không cần Enter
+  sau mỗi số; nhập `7`, Enter → vẫn hiện `7`.
+- Backspace (`0x08`) hoặc Delete (`0x7F`) xóa số đang hiện về `0`.
+- Ký tự khác bị bỏ qua, giữ số hiện tại. Không xử lý số âm hoặc thập phân.
+- Vào mode 1 xóa số; trở lại mode 2 hiện `0`.
 
 UART chạy **9600 baud, 8 data bits, no parity, 1 stop bit, LSB trước,
 idle 1**, không flow control. Bộ đếm dùng **5208 clock/bit**,
@@ -693,10 +720,10 @@ hoặc sau lỗi stop, RX đợi mức 1 liên tục một bit trước khi nh�
 Nên để terminal/adapter idle ít nhất 1 ms sau khi LED2 sáng rồi nhập.
 
 Tất cả logic dùng cạnh lên của clock 50 MHz, không tạo clock chia mới.
-Chỉ một digit được bật cố định trong mode 2, không cần quét chuyển digit.
-Mã segment cập nhật theo clock khi nhận dữ liệu mới. Ba digit còn lại luôn
-được xuất mức 1 để tắt; dấu chấm luôn tắt. Trong mode 1/reset, cả bốn digit
-và toàn bộ segment đều tắt.
+Trong mode 2 chỉ bật DIG1. Mỗi khi đổi số: tắt tất cả digit, đợi **5 µs**
+cho transistor PNP ngắt, nạp mã segment, đợi thêm **5 µs** rồi bật lại DIG1.
+Trong thời gian giữ số, digit sáng liên tục. DIG2–DIG4 luôn xuất mức 1 để tắt;
+dấu chấm luôn tắt. Trong mode 1/reset, cả bốn digit và toàn bộ segment đều tắt.
 
 Nhấn RESET kéo thấp gây reset bất đồng bộ. Nhả RESET qua hai FF đồng bộ
 trước khi logic hoạt động. Trong reset, TX idle, LED và hiển thị tắt.
@@ -725,6 +752,11 @@ sẽ vào mode 1. Cần nhấn rồi nhả RESET sau mỗi lần nạp.
    **Tools → Programmer**, chọn hardware USB-Blaster, mode **JTAG**,
    Add File **`output_files/matmul.sof`**, đánh dấu **Program/Configure**,
    nhấn **Start**. Không dùng AS để nạp trực tiếp file SOF.
+   Sau lần sửa này, cần **biên dịch lại rồi nạp lại SOF**. Mở QPF hoặc chỉ
+   chạy script tạo nguồn không thay chương trình đang chạy trong FPGA.
+   Trong Programmer, chọn lại đúng SOF vừa biên dịch tại
+   `/home/hoangb/workspace/matmul/output_files/matmul.sof` nếu dùng project tại
+   đường dẫn gốc; kiểm tra thời gian sửa file mới hơn các nguồn HDL.
 5. Nhấn rồi nhả nút **RESET**, chờ DIP ổn định. SOF nạp vào FPGA có tính
    tạm thời; mất nguồn cần nạp lại. Project này không tạo quy trình ghi
    flash EPCS.
@@ -740,16 +772,16 @@ Local echo không thay đổi dữ liệu FPGA nhận hay số trên LED.
 1. **DIP1 ON:** sau khoảng 20 ms LED1 sáng, LED khác tắt, toàn bộ LED
    7 đoạn tắt. PC nhận `AAAAAA…` liên tục, không thêm xuống dòng.
 2. **DIP1 OFF:** sau chống dội và frame TX cuối, LED2 sáng, terminal dừng
-   nhận `A`, digit đầu tiên hiện `0`, ba digit còn lại tắt.
+   nhận `A`, DIG1 hiện `0`, ba digit còn lại tắt.
    Chờ ít nhất 1 ms trước khi gõ.
-3. Gõ `1234` → lần lượt hiện `1`, `2`, `3`, `4`; gõ `5` → hiện `5`;
-   nhấn Enter → giữ `5`; gõ `6` → hiện `6` (bộ nhớ `0006`).
+3. Gõ riêng từng số `0` đến `9`: mỗi lần DIG1 hiện đúng số vừa gõ,
+   không cần Enter. Gõ `7`, Enter → giữ `7`; gõ `2` → hiện `2`.
    Thử terminal gửi Enter dưới dạng CR, LF rồi CRLF.
-4. Nhập số mới `1234`; Backspace → hiện `3`; Delete → hiện `2`.
+4. Gõ `7`, Backspace → hiện `0`; gõ `2`, Delete → hiện `0`.
    Nếu phím Delete gửi chuỗi escape thay vì byte `0x7F`, dùng tính năng
    gửi byte của terminal để thử đúng mã. Chỉ các byte `0x08`/`0x7F` mới xóa.
 5. Gửi `abc!?` → số giữ nguyên. Kiểm tra `0`…`9`, dấu chấm tắt,
-   chỉ vị trí đầu tiên bên trái sáng, ba vị trí còn lại tắt. LED nhỏ LED1/LED2
+   chỉ DIG1 sáng, ba vị trí còn lại tắt. LED nhỏ LED1/LED2
    báo mode, không dùng digit 7 đoạn làm đèn báo mode.
 6. Chuyển ON rồi OFF → hiện `0`. Thử bật/tắt nhanh hơn 20 ms: mode chỉ đổi
    khi mức mới ổn định đủ thời gian. Không dùng KEY1 như nút riêng.
@@ -772,13 +804,22 @@ QSF/SDC cũng đã qua kiểm tra cú pháp Tcl bằng `tclsh`, với các API Q
 được thay bằng hàm giả; bước này không xác minh tính hợp lệ của assignment
 trong Quartus, đối tượng timing sau tổng hợp hoặc kết quả timing.
 
-Kiểm tra tĩnh này **không phải trình biên dịch HDL**. Môi trường sửa project
-không có `quartus_sh`, `quartus_map`, `quartus_sta`, `iverilog`, `vvp`,
-`verilator` hoặc `yosys` trong PATH. Vì vậy **chưa chạy mô phỏng, chưa mở
-project bằng GUI Quartus, chưa biên dịch/synthesis/fitting, chưa có báo cáo
-timing hoặc xác nhận không có cảnh báo latch/multiple drivers từ công cụ**.
-Các bước trên cần chạy trên máy có Quartus và thử trên board thật.
-Chưa tạo SOF. Testbench được hoãn theo yêu cầu hiện tại.
+Kiểm tra tĩnh này **không phải trình biên dịch HDL**. Trong lần sửa lỗi này,
+đã tìm thấy Icarus Verilog 11.0 ngoài PATH tại `/tmp/cyclone-uart-tools/icarus/`.
+Đã chạy biên dịch/elaboration `-g2001 -Wall` cho top-level, và mô phỏng
+với clock 50 MHz, UART 9600 baud cùng chống dội 20 ms thực tế. Kết quả PASS:
+
+- Nhận nối tiếp ASCII `0`–`9` và kiểm tra mã hiển thị; giữ số với CR/LF,
+  ký tự khác, xóa với Backspace/Delete; bỏ start ngắn và frame stop thấp.
+- TX lặp `0x41` với start/data/stop 8N1; đổi mode, chống dội và reset trong RX/TX.
+- PIN_85/PIN_84 luôn ở mức tắt; LED báo mode đúng `1110`/`1101`, reset `1111`.
+- Chỉ DIG1 được bật; segment chỉ đổi khi tất cả digit tắt, khoảng tắt và
+  khoảng ổn định trước khi bật digit đều ít nhất 5 µs.
+
+Không giữ testbench tạm trong project. `quartus_sh`, `quartus_map`,
+`quartus_sta` vẫn không có trong PATH, nên **chưa mở GUI Quartus, chưa chạy
+synthesis/fitting/TimeQuest, chưa có SOF hoặc kết quả timing trên FPGA**.
+Icarus không thay thế kiểm tra timing và ánh xạ I/O của Quartus.
 
 Chưa xác minh kết nối và thứ tự LED/digit bằng PCB V3.0 thực tế.
 Đặc biệt, phải giải quyết xung đột **U4.12 ↔ PIN_115** trước khi nối TX adapter.
