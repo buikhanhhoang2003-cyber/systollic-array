@@ -23,6 +23,7 @@ module matmul (
     input  wire       clk_50mhz,
     input  wire       reset_n,
     input  wire       dip1_n,
+    input  wire       dip2_n,
     input  wire       uart_rx,
     output wire       uart_tx,
     output wire [3:0] led_n,
@@ -42,54 +43,58 @@ module matmul (
         end
     end
 
-    (* preserve *) reg dip_meta;
-    (* preserve *) reg dip_sync;
+    (* preserve *) reg [1:0] dip_meta;
+    (* preserve *) reg [1:0] dip_sync;
     always @(posedge clk_50mhz or negedge reset_sync) begin
         if (!reset_sync) begin
-            dip_meta <= 1'b1;
-            dip_sync <= 1'b1;
+            dip_meta <= 2'b11;
+            dip_sync <= 2'b11;
         end else begin
-            dip_meta <= dip1_n;
+            dip_meta <= {dip2_n, dip1_n};
             dip_sync <= dip_meta;
         end
     end
 
     reg [19:0] debounce_count;
-    reg requested_rx;
+    reg [1:0] dip_stable;
     always @(posedge clk_50mhz or negedge reset_sync) begin
         if (!reset_sync) begin
             debounce_count <= 20'd0;
-            requested_rx <= 1'b1;
-        end else if (dip_sync == requested_rx) begin
+            dip_stable <= 2'b11;
+        end else if (dip_sync == dip_stable) begin
             debounce_count <= 20'd0;
         end else if (debounce_count == 20'd999999) begin
             debounce_count <= 20'd0;
-            requested_rx <= dip_sync;
+            dip_stable <= dip_sync;
         end else begin
             debounce_count <= debounce_count + 1'b1;
         end
     end
 
     wire tx_busy;
-    reg mode_rx;
-    // Finish the current stop bit before entering RX mode.
+    localparam [1:0] MODE_IDLE = 2'd0, MODE_TX = 2'd1, MODE_RX = 2'd2;
+    // DIP2 takes priority so enabling RX cannot also start a TX frame.
+    wire [1:0] requested_mode = !dip_stable[1] ? MODE_RX :
+                                !dip_stable[0] ? MODE_TX : MODE_IDLE;
+    reg [1:0] mode;
+    // Finish the current stop bit before changing mode.
     always @(posedge clk_50mhz or negedge reset_sync) begin
         if (!reset_sync)
-            mode_rx <= 1'b1;
-        else if (!requested_rx)
-            mode_rx <= 1'b0;
+            mode <= MODE_IDLE;
         else if (!tx_busy)
-            mode_rx <= 1'b1;
+            mode <= requested_mode;
     end
+    wire mode_rx = (mode == MODE_RX);
 
     // {PIN_84, PIN_85, PIN_86, PIN_87}; 0 lights a small onboard LED.
     assign led_n = !reset_sync ? 4'b1111 :
-                   mode_rx ? 4'b1101 : 4'b1110;
+                   mode == MODE_TX ? 4'b1110 :
+                   mode_rx ? 4'b1101 : 4'b1111;
 
     uart_tx u_tx (
         .clk(clk_50mhz),
         .reset_n(reset_sync),
-        .enable(!mode_rx && !requested_rx),
+        .enable(mode == MODE_TX && requested_mode == MODE_TX),
         .data(8'h41),
         .tx(uart_tx),
         .busy(tx_busy)
@@ -100,6 +105,7 @@ module matmul (
     uart_rx u_rx (
         .clk(clk_50mhz),
         .reset_n(reset_sync),
+        .rx_enable(mode_rx),
         .rx(uart_rx),
         .data(rx_data),
         .valid(rx_valid)
@@ -180,17 +186,18 @@ endmodule
 __MATMUL_EMBEDDED_FILE_1__
 
 cat > "$destination/rtl/uart_rx.v" <<'__MATMUL_EMBEDDED_FILE_2__'
+`timescale 1ns / 1ps
+
 module uart_rx (
     input  wire       clk,
     input  wire       reset_n,
+    input  wire       rx_enable,
     input  wire       rx,
     output reg  [7:0] data,
     output reg        valid
 );
     localparam [12:0] BIT_LAST = 13'd5207;
     localparam [12:0] HALF_LAST = 13'd2603;
-    localparam [1:0] IDLE = 2'd0, START = 2'd1,
-                     DATA = 2'd2, STOP = 2'd3;
 
     (* preserve *) reg rx_meta;
     (* preserve *) reg rx_sync;
@@ -207,71 +214,56 @@ module uart_rx (
         end
     end
 
-    reg [1:0] state;
-    reg [12:0] bit_count;
-    reg [2:0] bit_index;
+    reg bps_start;
+    reg [12:0] baud_count;
+    reg [3:0] num;
     reg [7:0] shift_data;
+    // Clock enable at each bit midpoint; never used as a separate clock.
+    wire clk_bps = bps_start && (baud_count == HALF_LAST);
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n)
+            baud_count <= 13'd0;
+        else if (!rx_enable || !bps_start || baud_count == BIT_LAST)
+            baud_count <= 13'd0;
+        else
+            baud_count <= baud_count + 1'b1;
+    end
+
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            state <= IDLE;
-            bit_count <= 13'd0;
-            bit_index <= 3'd0;
-            shift_data <= 8'd0;
+            bps_start <= 1'b0;
             data <= 8'd0;
             valid <= 1'b0;
+            shift_data <= 8'd0;
+            num <= 4'd0;
         end else begin
             valid <= 1'b0;
-            // Keep frame synchronization in both modes; the top filters digits.
-            case (state)
-                IDLE: begin
-                    bit_count <= 13'd0;
-                    bit_index <= 3'd0;
-                    if (rx_previous && !rx_sync)
-                        state <= START;
-                end
-                START: begin
-                    if (bit_count == HALF_LAST) begin
-                        bit_count <= 13'd0;
-                        if (!rx_sync)
-                            state <= DATA;
-                        else
-                            state <= IDLE;
-                    end else begin
-                        bit_count <= bit_count + 1'b1;
+            if (!rx_enable) begin
+                bps_start <= 1'b0;
+                num <= 4'd0;
+                shift_data <= 8'd0;
+                data <= 8'd0;
+            end else if (!bps_start) begin
+                num <= 4'd0;
+                if (rx_previous && !rx_sync)
+                    bps_start <= 1'b1;
+            end else if (clk_bps) begin
+                if (num == 4'd0) begin
+                    if (rx_sync)
+                        bps_start <= 1'b0;
+                    else
+                        num <= 4'd1;
+                end else if (num <= 4'd8) begin
+                    shift_data[num - 1'b1] <= rx_sync;
+                    num <= num + 1'b1;
+                end else begin
+                    bps_start <= 1'b0;
+                    if (rx_sync) begin
+                        data <= shift_data;
+                        valid <= 1'b1;
                     end
                 end
-                DATA: begin
-                    if (bit_count == BIT_LAST) begin
-                        bit_count <= 13'd0;
-                        shift_data[bit_index] <= rx_sync;
-                        if (bit_index == 3'd7)
-                            state <= STOP;
-                        else
-                            bit_index <= bit_index + 1'b1;
-                    end else begin
-                        bit_count <= bit_count + 1'b1;
-                    end
-                end
-                STOP: begin
-                    if (bit_count == BIT_LAST) begin
-                        bit_count <= 13'd0;
-                        state <= IDLE;
-                        if (rx_sync) begin
-                            data <= shift_data;
-                            valid <= 1'b1;
-                        end
-                    end else begin
-                        bit_count <= bit_count + 1'b1;
-                    end
-                end
-                default: begin
-                    state <= IDLE;
-                    bit_count <= 13'd0;
-                    bit_index <= 3'd0;
-                    shift_data <= 8'd0;
-                    data <= 8'd0;
-                end
-            endcase
+            end
         end
     end
 endmodule
@@ -341,7 +333,7 @@ __MATMUL_EMBEDDED_FILE_4__
 
 cat > "$destination/matmul.qsf" <<'__MATMUL_EMBEDDED_FILE_5__'
 # Board pinout/device settings: ../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf
-# Used ports only; board key_n[0] is named dip1_n in this top-level.
+# Used ports only; board key_n[0..1] are named dip1_n/dip2_n here.
 # UART TX matches FPGA-UART-TX/PIN_114; RX uses board ext_clk_in/PIN_24.
 # Assignments are embedded so the project remains standalone.
 set_global_assignment -name TOP_LEVEL_ENTITY matmul
@@ -368,6 +360,8 @@ set_location_assignment PIN_25 -to reset_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to reset_n
 set_location_assignment PIN_88 -to dip1_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to dip1_n
+set_location_assignment PIN_89 -to dip2_n
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to dip2_n
 set_location_assignment PIN_87 -to {led_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[0]}
 set_location_assignment PIN_86 -to {led_n[1]}
@@ -415,7 +409,7 @@ derive_clock_uncertainty
 # Only the external asynchronous paths into the synchronizers are excluded.
 # Stage-to-stage paths and synchronized reset distribution remain timed.
 set_false_path -from [get_ports {reset_n}] -to [get_registers {*reset_meta *reset_sync}]
-set_false_path -from [get_ports {dip1_n}] -to [get_registers {*dip_meta}]
+set_false_path -from [get_ports {dip1_n dip2_n}] -to [get_registers {*dip_meta*}]
 set_false_path -from [get_ports {uart_rx}] -to [get_registers {*u_rx|rx_meta}]
 
 # LEDs have no capture clock; UART is sampled by an independent PC clock.
@@ -492,15 +486,16 @@ def main():
             ports.update(f"{name}[{i}]" for i in range(int(low), int(high) + 1))
         else:
             ports.add(name)
-    expected = dict(clk_50mhz=23, reset_n=25, dip1_n=88, uart_tx=114, uart_rx=24)
+    expected = dict(clk_50mhz=23, reset_n=25, dip1_n=88, dip2_n=89,
+                    uart_tx=114, uart_rx=24)
     for bus, pins in [("led_n", [87, 86, 85, 84]),
                       ("digit_n", [133, 135, 136, 137]),
                       ("seg_n", [128, 121, 125, 129, 132, 126, 124, 127])]:
         expected.update({f"{bus}[{i}]": pin for i, pin in enumerate(pins)})
     assert ports == set(expected) == set(locations) == set(standards)
     assert locations == expected
-    assert len(set(locations.values())) == len(ports) == 21
-    print("PASS: 21 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
+    assert len(set(locations.values())) == len(ports) == 22
+    print("PASS: 22 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
     print("      device/revision/top match; 4 HDL files and SDC exist.")
     print("Static checks only: HDL compilation, simulation and timing are not checked.")
 
@@ -518,7 +513,8 @@ là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 
 `matmul.qsf` lấy trực tiếp cấu hình device và các gán chân đang dùng từ
 **`../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf`** theo yêu cầu.
-Đổi tên cổng `key_n[0]` của file board thành `dip1_n` trong top-level.
+Đổi tên `key_n[0]` thành `dip1_n` (PIN_88) và `key_n[1]` thành `dip2_n`
+(PIN_89). Đây là **hai công tắc DIP vật lý khác nhau** trên board.
 TX dùng **PIN_114** giống `../FPGA-UART-TX/UART_TX.qsf`.
 Ví dụ đó chỉ phát TX, không có cổng RX; project bổ sung RX tại
 `ext_clk_in/PIN_24` của file board để tránh ngõ ra MAX3232 ở PIN_115.
@@ -532,15 +528,16 @@ cho mode 1 và LED2/PIN_86 cho mode 2 trên board**, tách biệt với cụm LE
 7 đoạn. Cả hai sáng ở mức 0; trong reset cả hai tắt. LED3/LED4 luôn tắt.
 Mỗi lần nhập một chữ số **0–9** qua terminal, digit 7 đoạn hiển thị ngay
 đúng chữ số đó: nhập `7` thì hiện `7`, nhập tiếp `2` thì thay bằng `2`.
-Ban đầu hiện `0`; không cần nhấn Enter để cập nhật.
+**DIP1 OFF, DIP2 ON** bật chế độ nhận. DIG1 hiện `0` ngay khi vào chế độ
+này, kể cả chưa nhận UART; không cần nhấn Enter để cập nhật số.
 
 ## Các file
 
 | File | Chức năng |
 |---|---|
-| `rtl/matmul.v` | Top-level, đồng bộ reset/DIP, chống dội, chọn mode, giữ một chữ số 0–9 |
+| `rtl/matmul.v` | Top-level, đồng bộ hai DIP, chống dội, chọn TX/RX/chờ, giữ một chữ số 0–9 |
 | `rtl/uart_tx.v` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
-| `rtl/uart_rx.v` | Đồng bộ RX hai FF, xác nhận start, lấy mẫu giữa bit, kiểm tra stop |
+| `rtl/uart_rx.v` | RX theo mẫu `bps_start`/`clk_bps`, đồng bộ đầu vào, xác nhận start và stop |
 | `rtl/sevenseg_scan.v` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
@@ -601,18 +598,19 @@ nếu để RX rời khỏi adapter, có thể thêm điện trở ngoài 10 kΩ
 
 ## Chân và cực tính
 
-Tất cả 21 chân dùng **3.3-V LVTTL**, không trùng chân. Các chân không dùng
+Tất cả 22 chân dùng **3.3-V LVTTL**, không trùng chân. Các chân không dùng
 được đặt **AS INPUT TRI-STATED** theo file board đã chỉ định. Các thiết lập
 NCEO, INIT_DONE, DEV_OE và DEV_CLRn lấy theo file đó; DEV_OE/DEV_CLRn tắt
 để sử dụng chân 86/87 cho LED. Không đặt `WEAK_PULL_UP_RESISTOR` trong QSF:
 Fitter báo lỗi 169057 với thiết lập này ở chân RESET/DIP1. Board có điện trở
-kéo lên ngoài cho RESET và DIP1; adapter điều khiển mức idle của UART RX.
+kéo lên ngoài cho RESET và các DIP; adapter điều khiển mức idle của UART RX.
 
 | Cổng HDL | Chức năng | Chân FPGA |
 |---|---|---|
 | `clk_50mhz` | Clock 50 MHz | 23 |
 | `reset_n` | Reset, nhấn = 0 | 25 |
-| `dip1_n` | DIP1 / KEY1, ON = 0 | 88 |
+| `dip1_n` | DIP1 / KEY1, yêu cầu phát, ON = 0 | 88 |
+| `dip2_n` | DIP2 / KEY2, yêu cầu nhận, ON = 0 | 89 |
 | `uart_tx`, `uart_rx` | TX, RX qua P1.7/P1.34 | 114, 24 |
 | `led_n[0]` … `led_n[3]` | LED1 … LED4 | 87, 86, 85, 84 |
 | `digit_n[0]` … `digit_n[3]` | DIG1 … DIG4 | 133, 135, 136, 137 |
@@ -662,16 +660,20 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
    giữ DIG2–DIG4 tắt. `Peripheral control 16 .../SEG_D.v` cũng dùng mã active-low
    và chọn từng digit bằng `1110`, `1101`, `1011`.
 
-DIP1 và KEY1 cùng chân 88. Không có chức năng KEY1 độc lập; khi DIP1 OFF,
-nhấn giữ KEY1 cũng có thể yêu cầu mode 1 sau thời gian chống dội.
+DIP1/KEY1 cùng chân 88, DIP2/KEY2 cùng chân 89. Không có chức năng độc lập
+cho hai nút này. Khi DIP tương ứng OFF, giữ KEY1/KEY2 cũng kéo cùng tín hiệu
+xuống 0. Chọn theo chữ **ON** in trên DIP: ON = 0, OFF = 1; hướng lên/xuống
+phụ thuộc hướng nhìn board.
 
 Giá trị cần thấy ở **các chân FPGA** sau khi chống dội:
 
 | Trạng thái | PIN_87 | PIN_86 | PIN_85 | PIN_84 | Chọn digit |
 |---|---|---|---|---|---|
 | Giữ RESET | 1 | 1 | 1 | 1 | `1111`, tắt hết |
-| Mode 1, DIP1 ON | 0 | 1 | 1 | 1 | `1111`, tắt hết |
-| Mode 2, DIP1 OFF | 1 | 0 | 1 | 1 | `1110`, chỉ DIG1; `1111` trong khoảng tắt |
+| DIP1 OFF, DIP2 OFF: chờ | 1 | 1 | 1 | 1 | `1111`, tắt hết |
+| DIP1 ON, DIP2 OFF: phát | 0 | 1 | 1 | 1 | `1111`, tắt hết |
+| DIP1 OFF, DIP2 ON: nhận | 1 | 0 | 1 | 1 | `1110`, chỉ DIG1; `1111` trong khoảng tắt |
+| DIP1 ON, DIP2 ON: ưu tiên nhận | 1 | 0 | 1 | 1 | `1110`, chỉ DIG1; `1111` trong khoảng tắt |
 
 PIN_85/PIN_84 được xuất mức 1 tường minh, không để tri-state. Chưa xác nhận
 trạng thái thực tế của phiên bản hiện tại trên phần cứng. Nếu hiện tượng
@@ -681,15 +683,17 @@ LED sai vẫn còn sau khi nạp SOF mới,
 
 ## Hành vi
 
-| DIP1 ổn định | LED nhỏ trên board | UART | LED 7 đoạn |
-|---|---|---|---|
-| ON = 0, mode 1 | LED1 sáng; LED2–4 tắt | Gửi `AAAAAA…`, không CR/LF | Tắt cả digit và segment |
-| OFF = 1, mode 2 | LED2 sáng; LED1/3/4 tắt | TX idle = 1, nhận RX, không echo | Digit đầu tiên hiện `0`, mỗi số 0–9 nhận được thay số đang hiện; ba digit còn lại tắt |
+| DIP1 | DIP2 | LED nhỏ trên board | UART | LED 7 đoạn |
+|---|---|---|---|---|
+| OFF | OFF | Tất cả tắt | TX idle, không nhận số | Tắt |
+| ON | OFF | LED1/PIN_87 sáng; LED2–4 tắt | Gửi `AAAAAA…`, không CR/LF | Tắt |
+| OFF | ON | LED2/PIN_86 sáng; LED1/3/4 tắt | TX idle, nhận RX, không echo | DIG1 hiện `0`, rồi hiện số 0–9 nhận được |
+| ON | ON | LED2 sáng; LED1/3/4 tắt | Ưu tiên RX, không phát `A` mới | Như chế độ nhận |
 
-Sau hai FF đồng bộ, DIP phải khác mode yêu cầu liên tục **1.000.000 clock
-= 20 ms** mới được chấp nhận. Khi chuyển từ mode 1 sang mode 2, TX hoàn tất
-frame đang chạy trước khi LED2 sáng và mode 2 có hiệu lực; độ trễ thêm tối
-đa khoảng **1,042 ms**. Không khởi động frame mới sau yêu cầu chuyển sang RX.
+Sau hai FF đồng bộ cho mỗi DIP, cặp mức DIP phải ổn định **1.000.000 clock
+= 20 ms** mới được chấp nhận. Khi rời chế độ phát, TX hoàn tất frame đang
+chạy trước khi chuyển sang nhận hoặc chờ; độ trễ thêm tối đa khoảng
+**1,042 ms**. Không khởi động frame mới sau yêu cầu rời TX.
 
 Quy tắc nhập trong mode 2:
 
@@ -699,33 +703,36 @@ Quy tắc nhập trong mode 2:
   sau mỗi số; nhập `7`, Enter → vẫn hiện `7`.
 - Backspace (`0x08`) hoặc Delete (`0x7F`) xóa số đang hiện về `0`.
 - Ký tự khác bị bỏ qua, giữ số hiện tại. Không xử lý số âm hoặc thập phân.
-- Vào mode 1 xóa số; trở lại mode 2 hiện `0`.
+- Rời chế độ nhận xóa số; bật DIP2 để nhận lại sẽ hiện `0`.
 
 UART chạy **9600 baud, 8 data bits, no parity, 1 stop bit, LSB trước,
 idle 1**, không flow control. Bộ đếm dùng **5208 clock/bit**,
 tương đương 9600,614 baud, sai số khoảng **+0,0064%**. TX giữ đủ cả stop bit;
 giữa các frame liên tiếp có thêm một clock 20 ns ở idle.
 
-RX dùng hai FF đồng bộ và một FF lưu mức trước để phát hiện cạnh xuống
-của start bit, tương tự cách phát hiện start trong ví dụ UART board.
-Xác nhận start sau nửa bit (2604 clock), lấy mẫu mỗi 5208 clock ở giữa
-tám bit dữ liệu và stop bit. Stop thấp thì bỏ frame, trở lại chờ cạnh start.
-RX luôn theo dõi khung UART ở cả hai mode; top-level chỉ cập nhật số khi
-mode 2 có hiệu lực. Không reset bộ nhận theo công tắc mode và không chờ
-thêm một bit idle khi chuyển mode.
+RX triển khai theo mẫu bộ nhận bạn cung cấp, chuyển `logic`/`always_ff`
+thành `wire`/`reg`/`always` để giữ Verilog-2001. `rx_enable` chỉ bật trong
+chế độ nhận do DIP2 chọn. Hai FF đồng bộ và một FF lưu mức trước phát hiện
+cạnh xuống start; `bps_start` khởi động bộ đếm baud nội bộ.
+`clk_bps` là **clock enable**, xuất hiện ở giữa mỗi bit; mọi thanh ghi vẫn
+dùng clock 50 MHz. Xác nhận start sau 2604 clock, rồi lấy tám data bit LSB
+trước và kiểm tra stop, cách nhau 5208 clock. Stop cao tạo `rx_valid` một
+clock và byte dữ liệu để parser nhận ASCII `0`–`9`; stop thấp thì bỏ frame.
+Không cần nối thêm module tạo baud hoặc clock khác ở ngoài.
 
 Tất cả logic dùng cạnh lên của clock 50 MHz, không tạo clock chia mới.
 Trong mode 2 chỉ bật DIG1. Mỗi khi đổi số: tắt tất cả digit, đợi **5 µs**
 cho transistor PNP ngắt, nạp mã segment, đợi thêm **5 µs** rồi bật lại DIG1.
 Trong thời gian giữ số, digit sáng liên tục. DIG2–DIG4 luôn xuất mức 1 để tắt;
-dấu chấm luôn tắt. Trong mode 1/reset, cả bốn digit và toàn bộ segment đều tắt.
+dấu chấm luôn tắt. Trong chế độ phát, chờ hoặc reset, tất cả digit/segment tắt.
 
 Nhấn RESET kéo thấp gây reset bất đồng bộ. Nhả RESET qua hai FF đồng bộ
 trước khi logic hoạt động. Trong reset, TX idle, LED và hiển thị tắt.
 Hai FF nhả reset có giá trị power-up bằng 0 cho FPGA, để mạch tự khởi động
 qua chuỗi reset khi nạp xong mà không phụ thuộc việc đã nhấn nút RESET.
-Sau nhả reset, mặc định vào RX/hiện `0`; nếu DIP1 ON, sau khoảng 20 ms
-sẽ vào mode 1. Cần nhấn rồi nhả RESET sau mỗi lần nạp.
+Sau nhả reset, mạch chờ hai DIP ổn định khoảng 20 ms rồi chọn chế độ theo
+bảng trên. Muốn nhận, đặt **DIP1 OFF, DIP2 ON**; LED2 sáng và DIG1 hiện `0`.
+Cần nhấn rồi nhả RESET sau mỗi lần nạp.
 
 ## Biên dịch và nạp bằng Quartus Prime Lite 21.1
 
@@ -766,10 +773,12 @@ Terminal cần gửi ký tự ngay từng phím; tắt line buffering/local line
 bật **Local echo → Force on** nếu muốn nhìn ký tự mình gõ trên PC.
 Local echo không thay đổi dữ liệu FPGA nhận hay số trên LED.
 
-1. **DIP1 ON:** sau khoảng 20 ms LED1 sáng, LED khác tắt, toàn bộ LED
+1. **DIP1 ON, DIP2 OFF:** sau khoảng 20 ms LED1 sáng, LED khác tắt, toàn bộ LED
    7 đoạn tắt. PC nhận `AAAAAA…` liên tục, không thêm xuống dòng.
-2. **DIP1 OFF:** sau chống dội và frame TX cuối, LED2 sáng, terminal dừng
-   nhận `A`, DIG1 hiện `0`, ba digit còn lại tắt.
+2. **DIP1 OFF, DIP2 ON:** sau chống dội và frame TX cuối, LED2 sáng,
+   terminal dừng nhận `A`, DIG1 hiện `0` ngay cả trước khi PC gửi dữ liệu.
+   Ba digit còn lại tắt. Nếu DIG1 chưa hiện `0`, mạch chưa ở trạng thái nhận
+   hoặc phần hiển thị/nạp FPGA chưa hoạt động đúng; chưa thể quy cho parser.
    Chờ ít nhất 1 ms trước khi gõ.
 3. Gõ riêng từng số `0` đến `9`: mỗi lần DIG1 hiện đúng số vừa gõ,
    không cần Enter. Gõ `7`, Enter → giữ `7`; gõ `2` → hiện `2`.
@@ -780,10 +789,11 @@ Local echo không thay đổi dữ liệu FPGA nhận hay số trên LED.
 5. Gửi `abc!?` → số giữ nguyên. Kiểm tra `0`…`9`, dấu chấm tắt,
    chỉ DIG1 sáng, ba vị trí còn lại tắt. LED nhỏ LED1/LED2
    báo mode, không dùng digit 7 đoạn làm đèn báo mode.
-6. Chuyển ON rồi OFF → hiện `0`. Thử bật/tắt nhanh hơn 20 ms: mode chỉ đổi
-   khi mức mới ổn định đủ thời gian. Không dùng KEY1 như nút riêng.
-7. Nhấn giữ RESET: TX idle, tất cả LED tắt; nhả RESET: hiện `0` trong RX,
-   hoặc tự chuyển sang TX sau chống dội nếu DIP1 vẫn ON.
+6. Tắt cả hai DIP → tất cả LED tắt, TX idle. Bật lại DIP2 → DIG1 hiện `0`.
+   Nếu cả hai ON, RX có ưu tiên. Thử bật/tắt nhanh hơn 20 ms: mode chỉ đổi
+   khi mức mới ổn định đủ thời gian. Không dùng KEY1/KEY2 như nút riêng.
+7. Nhấn giữ RESET: TX idle, tất cả LED tắt; nhả RESET: chờ 20 ms rồi chọn
+   lại chế độ theo DIP1/DIP2.
 
 ## Trạng thái bản sửa hiện tại
 
@@ -810,3 +820,4 @@ __MATMUL_EMBEDDED_FILE_8__
 printf 'Đã tạo 9 file project tại: %s\n' "$destination"
 printf 'Mở: %s/matmul.qpf (top-level/revision: matmul).\n' "$destination"
 printf 'UART: TX PIN_114/P1.7 -> RX adapter; RX PIN_24/P1.34 <- TX adapter; TTL 3.3 V, GND chung.\n'
+printf 'DIP1 ON, DIP2 OFF: TX A; DIP1 OFF, DIP2 ON: RX 0-9; DIP2 on PIN_89.\n'
