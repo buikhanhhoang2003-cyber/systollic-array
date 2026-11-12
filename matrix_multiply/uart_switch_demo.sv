@@ -8,19 +8,25 @@ module uart_switch_demo(
     input [1:0] key_n,
     input uart_rx,
     output uart_tx,
-    output [3:0] led_n,
+    output reg [3:0] led_n = 4'b1111,
     output reg [7:0] seg_n,
     output [3:0] digit_n
 );
 
 reg [1:0] reset_sync = 2'b00;
-reg [1:0] key_meta;
-reg [1:0] key_sync;
+reg [1:0] key_meta = 2'b11;
+reg [1:0] key_sync = 2'b11;
 wire reset_ready = reset_sync[1];
 wire tx_enable = !key_sync[0];
 wire rx_enable = !key_sync[1];
 
-assign led_n = reset_ready ? {2'b11, key_sync} : 4'b1111;
+// The schematic ties LED anodes to 3.3 V; initialize cathode outputs high.
+always @(posedge clk_50mhz or negedge reset_ready) begin
+    if (!reset_ready)
+        led_n <= 4'b1111;
+    else
+        led_n <= {2'b11, key_sync};
+end
 
 // Assert reset immediately, release it and sample the switch synchronously.
 always @(posedge clk_50mhz or negedge reset_n) begin
@@ -95,3 +101,4 @@ always @* begin
 end
 
 endmodule
+
