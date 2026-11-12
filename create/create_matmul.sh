@@ -340,6 +340,7 @@ set_global_assignment -name TOP_LEVEL_ENTITY matmul
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.1.0
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name VERILOG_INPUT_VERSION VERILOG_2001
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
 set_global_assignment -name VERILOG_FILE rtl/matmul.v
 set_global_assignment -name VERILOG_FILE rtl/uart_tx.v
 set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
@@ -347,9 +348,11 @@ set_global_assignment -name VERILOG_FILE rtl/sevenseg_scan.v
 set_global_assignment -name SDC_FILE matmul.sdc
 
 # Device and I/O assignments taken from the board QSF.
+# Bus targets use native QSF syntax, as in the vendor .qsf examples.
 set_global_assignment -name FAMILY "Cyclone IV E"
 set_global_assignment -name DEVICE EP4CE6E22C8
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "AS INPUT TRI-STATED"
 set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
 set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
@@ -362,38 +365,38 @@ set_location_assignment PIN_88 -to dip1_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to dip1_n
 set_location_assignment PIN_89 -to dip2_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to dip2_n
-set_location_assignment PIN_87 -to {led_n[0]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[0]}
-set_location_assignment PIN_86 -to {led_n[1]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[1]}
-set_location_assignment PIN_85 -to {led_n[2]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[2]}
-set_location_assignment PIN_84 -to {led_n[3]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[3]}
-set_location_assignment PIN_133 -to {digit_n[0]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[0]}
-set_location_assignment PIN_135 -to {digit_n[1]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[1]}
-set_location_assignment PIN_136 -to {digit_n[2]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[2]}
-set_location_assignment PIN_137 -to {digit_n[3]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[3]}
-set_location_assignment PIN_128 -to {seg_n[0]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[0]}
-set_location_assignment PIN_121 -to {seg_n[1]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[1]}
-set_location_assignment PIN_125 -to {seg_n[2]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[2]}
-set_location_assignment PIN_129 -to {seg_n[3]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[3]}
-set_location_assignment PIN_132 -to {seg_n[4]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[4]}
-set_location_assignment PIN_126 -to {seg_n[5]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[5]}
-set_location_assignment PIN_124 -to {seg_n[6]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[6]}
-set_location_assignment PIN_127 -to {seg_n[7]}
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[7]}
+set_location_assignment PIN_87 -to led_n[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to led_n[0]
+set_location_assignment PIN_86 -to led_n[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to led_n[1]
+set_location_assignment PIN_85 -to led_n[2]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to led_n[2]
+set_location_assignment PIN_84 -to led_n[3]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to led_n[3]
+set_location_assignment PIN_133 -to digit_n[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to digit_n[0]
+set_location_assignment PIN_135 -to digit_n[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to digit_n[1]
+set_location_assignment PIN_136 -to digit_n[2]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to digit_n[2]
+set_location_assignment PIN_137 -to digit_n[3]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to digit_n[3]
+set_location_assignment PIN_128 -to seg_n[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[0]
+set_location_assignment PIN_121 -to seg_n[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[1]
+set_location_assignment PIN_125 -to seg_n[2]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[2]
+set_location_assignment PIN_129 -to seg_n[3]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[3]
+set_location_assignment PIN_132 -to seg_n[4]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[4]
+set_location_assignment PIN_126 -to seg_n[5]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[5]
+set_location_assignment PIN_124 -to seg_n[6]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[6]
+set_location_assignment PIN_127 -to seg_n[7]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to seg_n[7]
 # TX matches UART_TX.qsf: P1 contact 7, also feeding the MAX3232 T1IN input.
 set_location_assignment PIN_114 -to uart_tx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
@@ -418,7 +421,7 @@ set_false_path -to [get_ports {uart_tx led_n[*] digit_n[*] seg_n[*]}]
 __MATMUL_EMBEDDED_FILE_6__
 
 cat > "$destination/check_project.py" <<'__MATMUL_EMBEDDED_FILE_7__'
-"""Check project files and pin coverage; this does not compile or simulate HDL."""
+"""Check source assignments and the Fitter .pin report when available; no compilation."""
 
 from pathlib import Path
 import re
@@ -450,13 +453,13 @@ def main():
                 globals_[words[2]] = words[3]
         elif command == "set_location_assignment":
             assert words[2] == "-to" and len(words) == 4, line
-            port = words[3].strip("{}")
+            port = words[3]
             assert port not in locations, port
             locations[port] = int(words[1].removeprefix("PIN_"))
         else:
             assert words[1:4] == ["-name", "IO_STANDARD", "3.3-V LVTTL"], line
             assert words[4] == "-to" and len(words) == 6, line
-            port = words[5].strip("{}")
+            port = words[5]
             assert port not in standards, port
             standards[port] = words[3]
 
@@ -464,7 +467,9 @@ def main():
     assert globals_["DEVICE"] == "EP4CE6E22C8"
     assert globals_["TOP_LEVEL_ENTITY"] == "matmul"
     assert globals_["VERILOG_INPUT_VERSION"] == "VERILOG_2001"
+    assert globals_["STRATIX_DEVICE_IO_STANDARD"] == "3.3-V LVTTL"
     assert globals_["RESERVE_ALL_UNUSED_PINS"] == "AS INPUT TRI-STATED"
+    assert globals_["RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP"] == "AS INPUT TRI-STATED"
     assert globals_["CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION"] == "USE AS REGULAR IO"
     assert globals_["ENABLE_DEVICE_WIDE_RESET"] == "OFF"
     assert globals_["ENABLE_DEVICE_WIDE_OE"] == "OFF"
@@ -499,6 +504,26 @@ def main():
     print("      device/revision/top match; 4 HDL files and SDC exist.")
     print("Static checks only: HDL compilation, simulation and timing are not checked.")
 
+    pin_report = root / globals_["PROJECT_OUTPUT_DIRECTORY"] / (revision + ".pin")
+    if pin_report.is_file():
+        fitted = set()
+        for line in pin_report.read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = [field.strip() for field in line.split(":")]
+            if len(fields) != 7 or fields[0] not in ports:
+                continue
+            name, location, _, standard, _, _, assigned = fields
+            assert name not in fitted, f"Duplicate Fitter pin: {name}"
+            assert location == str(locations[name]), (
+                f"{name}: Fitter uses PIN_{location}, expected PIN_{locations[name]}"
+            )
+            assert standard == standards[name], f"{name}: Fitter I/O standard is {standard}"
+            assert assigned == "Y", f"{name}: Fitter did not apply a user pin assignment"
+            fitted.add(name)
+        assert fitted == ports, f"Missing Fitter pins: {sorted(ports - fitted)}"
+        print("PASS: Fitter report matches all 22 pins, 3.3-V LVTTL, User Assignment=Y.")
+    else:
+        print("No Fitter .pin report found; actual placement has not been checked.")
+
 
 if __name__ == "__main__":
     main()
@@ -531,6 +556,37 @@ Mỗi lần nhập một chữ số **0–9** qua terminal, digit 7 đoạn hi�
 **DIP1 OFF, DIP2 ON** bật chế độ nhận. DIG1 hiện `0` ngay khi vào chế độ
 này, kể cả chưa nhận UART; không cần nhấn Enter để cập nhật số.
 
+## Sửa gán chân theo báo cáo Fitter
+
+Báo cáo `.pin` bạn cung cấp cho thấy các cổng bus output bị Fitter tự gán
+chân (`User Assignment = N`), trong khi clock, UART và DIP được gán đúng.
+Ví dụ:
+
+| Tín hiệu | Chân trong báo cáo sai | Chân board cần dùng |
+|---|---|---|
+| `led_n[0]` | 84 | 87 |
+| `digit_n[0]` | 98 | 133 |
+| `seg_n[0]` | 105 | 128 |
+
+Vì vậy DIG1 không nhận tín hiệu chọn digit, còn một số tín hiệu segment
+bị đưa sang chân LED nhỏ. Hiện tượng này chưa chứng minh UART không nhận
+byte; phải sửa ánh xạ output trước.
+
+QSF hiện dùng tên bus dạng native như các ví dụ vendor, chẳng hạn
+`set_location_assignment PIN_133 -to digit_n[0]`, đồng thời ghi rõ
+`IO_STANDARD` cho từng bit và mặc định toàn project là `3.3-V LVTTL`.
+Các cổng HDL giữ nguyên tên, không đổi logic UART hoặc parser vì báo cáo này.
+
+Sau khi biên dịch lại, báo cáo **mới** phải cho thấy:
+
+- `led_n[0..3]`: 87, 86, 85, 84.
+- `digit_n[0..3]`: 133, 135, 136, 137.
+- `seg_n[0..7]`: 128, 121, 125, 129, 132, 126, 124, 127.
+- Tất cả output trên có `3.3-V LVTTL` và **`User Assignment = Y`**.
+
+Các giá trị VCCIO/2.5 V trong báo cáo cũ là cấu hình mà Quartus suy ra cho
+bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
+
 ## Các file
 
 | File | Chức năng |
@@ -541,7 +597,7 @@ này, kể cả chưa nhận UART; không cần nhấn Enter để cập nhật 
 | `rtl/sevenseg_scan.v` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
-| `check_project.py` | Tự kiểm tra tĩnh cổng/chân, I/O, device và file nguồn |
+| `check_project.py` | Kiểm tra QSF/HDL và đối chiếu chân, I/O, User Assignment của `.pin` nếu có |
 
 Không kèm testbench trong project. Theo yêu cầu hiện tại, không chạy Icarus
 hoặc kiểm thử local cho bản sửa này. QSF chỉ đưa bốn file HDL trong `rtl/`
@@ -604,6 +660,9 @@ NCEO, INIT_DONE, DEV_OE và DEV_CLRn lấy theo file đó; DEV_OE/DEV_CLRn tắt
 để sử dụng chân 86/87 cho LED. Không đặt `WEAK_PULL_UP_RESISTOR` trong QSF:
 Fitter báo lỗi 169057 với thiết lập này ở chân RESET/DIP1. Board có điện trở
 kéo lên ngoài cho RESET và các DIP; adapter điều khiển mức idle của UART RX.
+QSF cũng đặt `STRATIX_DEVICE_IO_STANDARD` thành `3.3-V LVTTL` để tránh
+dùng mặc định 2.5 V cho một cổng chưa có chuẩn I/O riêng. Chân chính xác
+vẫn phải được xác nhận bằng báo cáo Fitter, không chỉ dựa vào file nguồn.
 
 | Cổng HDL | Chức năng | Chân FPGA |
 |---|---|---|
@@ -738,6 +797,9 @@ Cần nhấn rồi nhả RESET sau mỗi lần nạp.
 
 1. Cài hỗ trợ device **Cyclone IV E**. Mở `matmul.qpf`, kiểm tra revision
    `matmul`, top-level `matmul`, device **EP4CE6E22C8**.
+   Nếu Quartus đang mở bản cũ, đóng project, cập nhật lại file QSF từ bản
+   sửa này rồi mở lại QPF để đọc lại assignment. Không dùng báo cáo `.pin`
+   hoặc SOF của lần biên dịch trước để đánh giá các thay đổi mới.
 2. Chọn **Processing → Start Compilation**. Hoặc mở terminal có Quartus
    trong PATH, chuyển vào thư mục này và chạy:
 
@@ -752,6 +814,9 @@ Cần nhấn rồi nhả RESET sau mỗi lần nạp.
    bất đồng bộ vào tầng đồng bộ đầu tiên (reset vào hai FF nhả reset),
    và tới các ngõ ra ngoài không có clock thu đồng bộ. Đường giữa hai FF
    và reset nội bộ vẫn được phân tích timing.
+   Mở `output_files/matmul.pin`, đối chiếu bảng chân ở trên: `digit_n[0]`
+   phải ở 133, `seg_n[0]` ở 128, toàn bộ output phải có `User Assignment=Y`
+   và chuẩn 3.3-V LVTTL trước khi nạp SOF.
 4. Kết nối USB-Blaster/JTAG đúng chiều theo board. Trong
    **Tools → Programmer**, chọn hardware USB-Blaster, mode **JTAG**,
    Add File **`output_files/matmul.sof`**, đánh dấu **Program/Configure**,
@@ -801,8 +866,12 @@ Theo yêu cầu, **không chạy Icarus, mô phỏng, biên dịch hoặc kiểm
 cho phiên bản HDL/QSF hiện tại. Không có xác nhận hoạt động trên board thật.
 Kết quả mô phỏng các bản trước không được dùng để kết luận bản sửa này đạt.
 
-`check_project.py` đã được cập nhật theo gán chân UART mới và bỏ pull-up nội,
-nhưng không chạy trong lần sửa này. Nếu sau này cần kiểm tra tĩnh bằng
+`check_project.py` đã được cập nhật theo gán chân hiện tại và đối chiếu
+`output_files/matmul.pin` nếu file đó tồn tại. Công cụ báo lỗi nếu Fitter
+tự gán sai chân, dùng sai I/O standard, thiếu cổng hoặc `User Assignment=N`.
+Không chuẩn hóa bỏ dấu ngoặc nhọn ở tên cổng QSF khi kiểm tra để tránh
+che mất khác biệt tên cổng. Công cụ không chạy trong lần sửa này.
+Nếu sau này cần kiểm tra bằng
 Python 3.9 trở lên, có thể chạy thủ công:
 
 ```sh
@@ -821,3 +890,4 @@ printf 'Đã tạo 9 file project tại: %s\n' "$destination"
 printf 'Mở: %s/matmul.qpf (top-level/revision: matmul).\n' "$destination"
 printf 'UART: TX PIN_114/P1.7 -> RX adapter; RX PIN_24/P1.34 <- TX adapter; TTL 3.3 V, GND chung.\n'
 printf 'DIP1 ON, DIP2 OFF: TX A; DIP1 OFF, DIP2 ON: RX 0-9; DIP2 on PIN_89.\n'
+printf 'Sau biên dịch, xem output_files/matmul.pin: DIG1=133, segment a=128, 3.3-V LVTTL, User Assignment=Y.\n'
