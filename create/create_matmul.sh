@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Tạo UART ba mode, accelerator 4 core/tile 4x4 và GUI PyQt; cần Bash và coreutils.
+# Nhúng testbench đo thời gian không UART; chỉ tạo file, không tự chạy mô phỏng.
 # Cách dùng: bash create_matmul.sh [thư_mục_đích]
 # Đích mặc định: ./matmul. Thư mục cha phải tồn tại; đích phải chưa tồn tại.
 set -euo pipefail
@@ -18,6 +19,7 @@ if ! mkdir -- "$destination"; then
 fi
 mkdir -- "$destination/rtl"
 mkdir -- "$destination/rtl/accelerator"
+mkdir -- "$destination/tb"
 
 cat > "$destination/rtl/matmul.sv" <<'__MATMUL_EMBEDDED_FILE_0__'
 module matmul (
@@ -358,7 +360,7 @@ PROJECT_REVISION = "matmul"
 __MATMUL_EMBEDDED_FILE_4__
 
 cat > "$destination/matmul.qsf" <<'__MATMUL_EMBEDDED_FILE_5__'
-# Board pinout/device settings: ../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf
+# Board pinout/device settings: ../../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf
 # Used ports only; board key_n[0..2] are named dip1_n/dip2_n/dip3_n here.
 # UART TX matches FPGA-UART-TX/PIN_114; RX uses board ext_clk_in/PIN_24.
 # Assignments are embedded so the project remains standalone.
@@ -580,16 +582,19 @@ __MATMUL_EMBEDDED_FILE_7__
 cat > "$destination/README.md" <<'__MATMUL_EMBEDDED_FILE_8__'
 # UART và nhân ma trận — Cyclone IV V3.0
 
+Project hiện tại: **`/home/hoangb/workspace/matmul/matmul/matmul.qpf`**.
+Mở QPF trong thư mục này khi biên dịch và nạp FPGA.
+
 Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**. Toàn bộ HDL dùng
 **SystemVerilog (`.sv`)**; lõi tăng tốc giữ nguyên bốn module gốc.
 Mở **`matmul.qpf`** bằng Quartus Prime Lite 21.1; revision và top-level đều
-là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
+là **`matmul`**. Không cần thêm file từ các thư mục tham khảo.
 
 `matmul.qsf` lấy trực tiếp cấu hình device và các gán chân đang dùng từ
-**`../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf`** theo yêu cầu.
+**`../../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf`** theo yêu cầu.
 Đổi tên `key_n[0..2]` thành `dip1_n`, `dip2_n`, `dip3_n`
 (PIN_88, PIN_89, PIN_90). Đây là **ba công tắc DIP vật lý** trên board.
-TX dùng **PIN_114** giống `../FPGA-UART-TX/UART_TX.qsf`.
+TX dùng **PIN_114** giống `../../FPGA-UART-TX/UART_TX.qsf`.
 Ví dụ đó chỉ phát TX, không có cổng RX; project bổ sung RX tại
 `ext_clk_in/PIN_24` của file board để tránh ngõ ra MAX3232 ở PIN_115.
 Các assignment được nhúng vào QSF của project; không cần file board khi
@@ -649,7 +654,7 @@ READY
 Không cần lệnh RUN: FPGA tự nhân sau khi nhận đủ B. Các dòng kết quả dùng
 CRLF. Kết quả dùng **35 bit có dấu**, đủ chứa tổng 8 tích của số 16 bit,
 kể cả giá trị dương 8589934592; không cắt xuống 16/32 bit. Lõi tính dùng
-**bốn core song song, tile 4×4**, port từ `../matmul8x8_4core_tile4x4`.
+**bốn core song song, tile 4×4**, port từ `../../matmul8x8_4core_tile4x4`.
 Kết quả được đổi sang ASCII bằng binary-to-BCD tuần tự, không dùng bộ chia.
 
 - Thiếu phần tử: FPGA chờ tiếp. Khi đang nhập, gửi `M` hoặc `m` để bắt đầu
@@ -671,7 +676,7 @@ Không xuất nội dung RAM cũ sau reset hoặc sau khi hủy phép nhân.
 ## Kiến trúc tăng tốc: bốn core, tile 4×4
 
 Đã đọc `README.txt`, bốn module RTL và testbench của repo tham khảo
-`../matmul8x8_4core_tile4x4`. Project nhúng các module đã port, không phụ thuộc
+`../../matmul8x8_4core_tile4x4`. Project nhúng các module đã port, không phụ thuộc
 đường dẫn repo đó khi biên dịch hoặc chạy `create_matmul.sh` trên máy khác.
 Repo tham khảo được giữ nguyên. **Bốn file accelerator được chép nguyên nội
 dung**, giữ đúng tên module, cổng, FSM, mảng liên kết, forwarding và pipeline:
@@ -736,13 +741,74 @@ vẫn tốn thời gian; tốc độ truyền có thể chiếm phần lớn t�
 
 `matrix_uart.sv` có self-check chỉ dành cho mô phỏng trong
 `synthesis translate_off`: kiểm tra địa chỉ kết quả 0…63 và đủ 64 phần tử
-trước done. Không đưa thêm testbench vào project. Chưa chạy mô phỏng cho
+trước done. Testbench đo thời gian nằm ngoài danh sách nguồn tổng hợp. Chưa chạy mô phỏng cho
 bản tích hợp UART; kết quả trong `test-results-16bit.txt` của repo tham khảo không
 phải kết quả kiểm thử của project này.
 
 **Bản port này thay HDL:** mở lại `matmul.qpf`, biên dịch toàn project,
 nạp `output_files/matmul.sof` mới và nhấn/nhả RESET. GUI hiện tại dùng được
 với cùng giao thức; không cần đổi file Python để dùng lõi mới.
+
+## Testbench đo thời gian, không gồm UART
+
+File **`tb/tb_matmul_timing.sv`** đo tại clock **50 MHz / 20 ns**. Bench chạy
+hai instance: `matmul8x8_top` độc lập và `matrix_uart` chứa toàn bộ đường
+tính của ứng dụng (parser, bộ đệm A/B, đóng gói tile, accelerator, RAM C và
+định dạng kết quả). Không sửa bốn module accelerator gốc hoặc RTL tổng hợp.
+
+Chạy thủ công khi máy đã có Icarus Verilog và vvp:
+
+```sh
+cd /home/hoangb/workspace/matmul/matmul
+bash run_timing.sh
+```
+
+Kết quả được in ra terminal và ghi vào **`build/timing/timing.log`**.
+Mỗi chỉ số có **số chu kỳ, ns và µs**, với `T = cycles × 20 ns`.
+Script dùng `iverilog -g2012` và `vvp -N`; tùy chọn `-N` làm mô phỏng trả
+lỗi khi gặp `$stop` thay vì chờ tương tác
+([tài liệu Icarus](https://steveicarus.github.io/iverilog/usage/vvp_flags.html)).
+
+Các mốc chính:
+
+| Chỉ số trong log | Bắt đầu | Kết thúc / phạm vi |
+|---|---|---|
+| `ACCEL_START_TO_DONE` | Cạnh nhận `start && start_ready` | Cạnh `done` lên sau khi nhận phần tử C thứ 64; gồm đọc tile, tính và xuất C nội bộ |
+| `ACCEL_LOAD_TO_DONE` | Cạnh ghi tile đầu tiên | Cùng mốc done; thêm nạp tám tile liên tiếp vào module độc lập |
+| `SYSTEM_RESULTS_IN_RAM` | Cạnh parser chấp nhận ký tự phân cách sau số B cuối | Cạnh ghi C thứ 64 vào RAM kết quả |
+| `SYSTEM_BINARY_TOTAL` | Cùng mốc nhận đủ A/B | FSM vào HEADER, đã có đủ C trong RAM và sẵn sàng xuất kết quả |
+| `SYSTEM_TOTAL_NO_UART` | Cùng mốc nhận đủ A/B | Hoàn tất cả phản hồi ASCII và READY, quay về WAIT_M, với `tx_ready=1` |
+
+Bench cũng in `ACCEL_START_TO_FIRST_VALID`, `SYSTEM_PACK_AND_LOAD`,
+`SYSTEM_ACCEL_START_OFFSET` và `SYSTEM_ASCII_ONLY` để tách chi phí đọc/đóng
+gói, khởi chạy accelerator và đổi số thành ASCII.
+
+**`SYSTEM_BINARY_TOTAL` là tổng thời gian đường nhân ma trận nội bộ.**
+Nếu muốn tính cả định dạng phản hồi nhưng vẫn loại bỏ UART, dùng
+**`SYSTEM_TOTAL_NO_UART`**. Hai giá trị không phải hai phép nhân khác nhau.
+Mốc first-valid là lúc valid xuất hiện, còn phần tử chỉ được nhận ở cạnh
+handshake kế tiếp. Bench lấy hiệu chỉ số hai cạnh, không cộng thêm một chu kỳ;
+handshake được đọc trước NBA và done/state được đọc sau NBA trên cùng cạnh.
+
+Byte ASCII được đưa vào cổng `rx_data/rx_valid` của `matrix_uart`, không
+truyền thành frame qua UART RX. Phần chuẩn bị/nhập số hoàn tất trước mốc
+bắt đầu tính và không được cộng vào total. `tx_ready` luôn bằng 1 nên không
+có thời gian chờ UART TX, start/data/stop bit hoặc baud 9600. Với chỉ số
+binary, cả định dạng ASCII cũng được loại trừ. Clock, DIP và reset được coi
+là đã ổn định; bench không đo chống dội, USB-UART, terminal hay thời gian PC.
+Không force FSM, start hoặc RAM bên trong DUT để rút ngắn đường tính.
+
+Ba ca chạy: hai ma trận 8×8 có dấu; 8×8 với mọi phần tử bằng −32768
+(kết quả 8589934592 để kiểm tra tổng vượt 32 bit); và A 3×5 nhân B 5×7.
+Không reset giữa các ca, để kiểm tra đệm 0 không dùng dữ liệu cũ. Bench kiểm
+tra 64 giá trị C của accelerator, 64 ô cache C và toàn bộ phản hồi ASCII
+bằng mô hình signed 64 bit, rồi mới hoàn tất báo cáo. Có timeout toàn cục.
+
+Theo yêu cầu trước, **chưa thực thi testbench hoặc script mô phỏng** trong
+lần sửa này. Chưa có số đo thực nghiệm cho bản tích hợp; không lấy số liệu
+ở repo tham khảo làm kết quả của bench này. Đây là phép đo latency RTL
+tại clock giả định 50 MHz, không chứng minh thiết kế đạt timing trên FPGA;
+vẫn cần biên dịch Quartus và xem TimeQuest để xác nhận.
 
 ## Ứng dụng Python / PyQt cho PC
 
@@ -755,7 +821,7 @@ cho UART. Không cần NumPy; phép nhân Python dùng số nguyên không cắt
 Cài thư viện rồi mở ứng dụng trên Linux:
 
 ```sh
-cd /home/hoangb/workspace/matmul
+cd /home/hoangb/workspace/matmul/matmul
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-gui.txt
@@ -870,14 +936,16 @@ bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
 | `UART_MATRIX_EXAMPLE.md` | Hướng dẫn từng bước, dữ liệu 8×8 để copy/paste và kết quả mong đợi |
 | `matrix_gui.py` | Giao diện PyQt, tính Python, gửi UART, parse và đối chiếu kết quả FPGA |
 | `requirements-gui.txt` | Thư viện PyQt5 và pySerial cho ứng dụng PC |
+| `tb/tb_matmul_timing.sv` | Đo latency accelerator và toàn đường tính không UART, kiểm tra C/ASCII |
+| `run_timing.sh` | Biên dịch/chạy testbench khi gọi thủ công; ghi log trong build/timing |
 
-Không kèm testbench trong project. Theo yêu cầu hiện tại, không chạy Icarus
-hoặc kiểm thử local cho bản sửa này. QSF đưa năm file SystemVerilog giao tiếp
+Testbench chỉ dành cho mô phỏng, không đưa vào QSF. Theo yêu cầu trước,
+chưa chạy Icarus hoặc kiểm thử local cho bản sửa này. QSF đưa năm file SystemVerilog giao tiếp
 trong `rtl/` và bốn file SystemVerilog trong `rtl/accelerator/` vào tổng hợp.
 
 ## Tạo lại project bằng một file shell
 
-File `create_matmul.sh` chứa sẵn nội dung của mười bảy file project trong bản
+File `create_matmul.sh` chứa sẵn nội dung của mười chín file project trong bản
 hiện tại, không cần mạng hoặc thư mục tham khảo để tạo file. Chạy bằng Bash:
 
 ```sh
@@ -953,7 +1021,7 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
 
 Đối chiếu nguồn tài liệu:
 
-1. `../Altera-Cyclone-IV-board-V3.0/Hardware documentation/Development board pin information.pdf`,
+1. `../../Altera-Cyclone-IV-board-V3.0/Hardware documentation/Development board pin information.pdf`,
    trang 1–3: clock, reset, KEY/DIP chung chân, LED và LED 7 đoạn khớp bảng
    gán trên; TX là chân UART 114, RX được chủ động đổi sang chân mở rộng 24.
 2. `Hardware documentation/Development board schematic diagram V2.1.pdf`,
@@ -978,7 +1046,7 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
    chọn DIG4 theo giả định "đầu tiên bên trái"; nay dùng tên DIG1 của board.
    Không đổi chân segment. Nếu thay đổi gán chân QSF,
    cập nhật bảng kỳ vọng tương ứng trong `check_project.py`.
-5. `../FPGA-UART-TX/UART_TX.qsf` và `README.md` xác nhận clock chân 23,
+5. `../../FPGA-UART-TX/UART_TX.qsf` và `README.md` xác nhận clock chân 23,
    TX chân 114, KEY1 chân 88, LED1–LED4 ở 87–84 và 5208 clock/bit.
    Project giữ các chân đang dùng đó. RX chân 24 là phần bổ sung vì ví dụ
    không có bộ nhận. Mã ví dụ không được sao chép nguyên vì cần bổ sung
@@ -1101,7 +1169,7 @@ Cần nhấn rồi nhả RESET sau mỗi lần nạp.
    Sau lần sửa này, cần **biên dịch lại rồi nạp lại SOF**. Mở QPF hoặc chỉ
    chạy script tạo nguồn không thay chương trình đang chạy trong FPGA.
    Trong Programmer, chọn lại đúng SOF vừa biên dịch tại
-   `/home/hoangb/workspace/matmul/output_files/matmul.sof` nếu dùng project tại
+   `/home/hoangb/workspace/matmul/matmul/output_files/matmul.sof` nếu dùng project tại
    đường dẫn gốc; kiểm tra thời gian sửa file mới hơn các nguồn HDL.
 5. Nhấn rồi nhả nút **RESET**, chờ DIP ổn định. SOF nạp vào FPGA có tính
    tạm thời; mất nguồn cần nạp lại. Project này không tạo quy trình ghi
@@ -2626,7 +2694,318 @@ endmodule
 `default_nettype wire
 __MATMUL_EMBEDDED_FILE_16__
 
-printf 'Đã tạo 17 file project tại: %s\n' "$destination"
+cat > "$destination/tb/tb_matmul_timing.sv" <<'__MATMUL_EMBEDDED_FILE_17__'
+`timescale 1ns/1ps
+`default_nettype none
+
+module tb_matmul_timing;
+    localparam integer CLK_PERIOD_NS = 20;
+    reg clk = 1'b0;
+    always #(CLK_PERIOD_NS/2) clk = ~clk;
+
+    reg rst = 1'b1, reset_n = 1'b0;
+    reg load_valid = 1'b0, load_matrix = 1'b0, start = 1'b0;
+    reg [1:0] load_tile_id = 2'd0;
+    reg [255:0] load_tile_data = 256'd0;
+    wire load_ready, start_ready, busy, done, result_valid;
+    wire [5:0] result_addr;
+    wire signed [34:0] result_data;
+
+    matmul8x8_top block_dut (
+        .clk(clk), .rst(rst),
+        .load_valid(load_valid), .load_ready(load_ready),
+        .load_matrix(load_matrix), .load_tile_id(load_tile_id), .load_tile_data(load_tile_data),
+        .start(start), .start_ready(start_ready), .busy(busy), .done(done),
+        .result_valid(result_valid), .result_ready(1'b1),
+        .result_addr(result_addr), .result_data(result_data)
+    );
+
+    // The board's complete compute path, with byte-level RX and no TX stalls.
+    // No UART baud clocks, force of internal state, or direct RAM preload.
+    reg [7:0] rx_data = 8'd0;
+    reg rx_valid = 1'b0;
+    wire [7:0] tx_data;
+    wire tx_valid;
+    matrix_uart system_dut (
+        .clk(clk), .reset_n(reset_n), .enable(1'b1),
+        .rx_data(rx_data), .rx_valid(rx_valid),
+        .tx_data(tx_data), .tx_valid(tx_valid), .tx_ready(1'b1)
+    );
+
+    reg signed [15:0] a [0:7][0:7], b [0:7][0:7];
+    longint signed golden [0:7][0:7];
+    integer rows_m, inner_k, cols_n;
+    string case_name, expected_reply;
+
+    longint signed tick = 0;
+    bit measure_block = 0, measure_system = 0;
+    bit block_finished, binary_finished, reply_finished;
+    integer block_loads, block_results, system_results, ascii_bytes;
+    longint signed block_load_cycle, block_start_cycle, block_first_cycle, block_done_cycle;
+    longint signed input_complete_cycle, tiles_loaded_cycle, system_start_cycle;
+    longint signed system_done_cycle, cache_complete_cycle, binary_ready_cycle, reply_done_cycle;
+    integer check_r, check_c;
+
+    // Handshakes are sampled before NBA; done/state are sampled after NBA.
+    // One monitor owns tick, so both types of event use the same edge number.
+    always @(posedge clk) begin
+        tick = tick + 1;
+        if (measure_block && !rst) begin
+            if (load_valid && load_ready) begin
+                if (block_loads == 0) block_load_cycle = tick;
+                block_loads = block_loads + 1;
+            end
+            if (start && start_ready) begin
+                if (block_loads != 8 || block_start_cycle >= 0)
+                    $fatal(1, "Invalid standalone start/load sequence");
+                block_start_cycle = tick;
+            end
+            if (result_valid) begin
+                if (block_results >= 64 || result_addr !== block_results[5:0])
+                    $fatal(1, "Standalone C address/order error");
+                if ($signed(result_data) !== golden[block_results/8][block_results%8])
+                    $fatal(1, "Standalone C[%0d] mismatch", block_results);
+                block_results = block_results + 1;
+            end
+        end
+
+        if (measure_system && reset_n) begin
+            if (system_dut.accept_token && system_dut.state == system_dut.LOAD_B &&
+                system_dut.input_row == inner_k-1 &&
+                system_dut.input_col == cols_n-1) begin
+                if (input_complete_cycle >= 0)
+                    $fatal(1, "Duplicate input-complete event");
+                input_complete_cycle = tick;
+            end
+            if (input_complete_cycle >= 0) begin
+                if (system_dut.state == system_dut.TILE_LOAD && system_dut.core_load_ready &&
+                    system_dut.load_matrix && system_dut.load_tile == 2'd3)
+                    tiles_loaded_cycle = tick;
+                if (system_dut.state == system_dut.CORE_START && system_dut.core_start_ready)
+                    system_start_cycle = tick;
+                if (system_dut.state == system_dut.CORE_WAIT && system_dut.core_result_valid) begin
+                    if (system_results >= 64 || system_dut.core_result_addr !== system_results[5:0])
+                        $fatal(1, "System C address/order error");
+                    if ($signed(system_dut.core_result_data) !== golden[system_results/8][system_results%8])
+                        $fatal(1, "System C[%0d] mismatch", system_results);
+                    system_results = system_results + 1;
+                    if (system_results == 64) cache_complete_cycle = tick;
+                end
+                if (tx_valid) begin
+                    if (ascii_bytes >= expected_reply.len() || tx_data !== expected_reply[ascii_bytes])
+                        $fatal(1, "ASCII reply mismatch at byte %0d", ascii_bytes);
+                    ascii_bytes = ascii_bytes + 1;
+                end
+            end
+        end
+
+        #1ps;
+        if (measure_block && !rst) begin
+            if (result_valid && block_first_cycle < 0) block_first_cycle = tick;
+            if (done && !block_finished) begin
+                if (block_results != 64 || busy || block_start_cycle < 0)
+                    $fatal(1, "Standalone done without 64 accepted C values");
+                block_done_cycle = tick;
+                block_finished = 1;
+            end
+        end
+        if (measure_system && input_complete_cycle >= 0) begin
+            if (system_dut.core_done && system_done_cycle < 0) system_done_cycle = tick;
+            if (!binary_finished && system_dut.state == system_dut.HEADER) begin
+                if (system_results != 64 || system_done_cycle < 0 || system_start_cycle < 0)
+                    $fatal(1, "Binary output became ready before computation completed");
+                for (check_r=0; check_r<8; check_r=check_r+1)
+                    for (check_c=0; check_c<8; check_c=check_c+1)
+                        if ($signed(system_dut.matrix_c[8*check_r+check_c]) !== golden[check_r][check_c])
+                            $fatal(1, "Cached C[%0d,%0d] mismatch", check_r, check_c);
+                binary_ready_cycle = tick;
+                binary_finished = 1;
+            end
+            if (binary_finished && !reply_finished && system_dut.state == system_dut.WAIT_M) begin
+                if (ascii_bytes != expected_reply.len())
+                    $fatal(1, "Incomplete ASCII reply: %0d/%0d bytes", ascii_bytes, expected_reply.len());
+                reply_done_cycle = tick;
+                reply_finished = 1;
+            end
+        end
+    end
+
+    task automatic show_time(input string label, input longint signed cycles);
+        begin
+            if (cycles < 0) $fatal(1, "Missing timing event: %s", label);
+            $display("  %-32s %0d cycles | %0d ns | %0.3f us",
+                     label, cycles, cycles*CLK_PERIOD_NS, cycles*CLK_PERIOD_NS/1000.0);
+        end
+    endtask
+
+    task automatic prepare_case(input integer m, k, n, input bit extreme);
+        integer r, c, p;
+        longint signed av, bv;
+        begin
+            rows_m=m; inner_k=k; cols_n=n;
+            for (r=0; r<8; r=r+1) begin
+                for (c=0; c<8; c=c+1) begin
+                    a[r][c]=0;
+                    b[r][c]=0;
+                    if (r<m && c<k) a[r][c]=extreme ? -32768 : (5*r+3*c)%17-8;
+                    if (r<k && c<n) b[r][c]=extreme ? -32768 : (7*r+2*c)%19-9;
+                end
+            end
+            for (r=0; r<8; r=r+1) begin
+                for (c=0; c<8; c=c+1) begin
+                    golden[r][c]=0;
+                    for (p=0; p<8; p=p+1) begin
+                        av=a[r][p]; bv=b[p][c];
+                        golden[r][c]=golden[r][c]+av*bv;
+                    end
+                end
+            end
+            expected_reply=$sformatf("C %0d %0d\r\n", m, n);
+            for (r=0; r<m; r=r+1) begin
+                for (c=0; c<n; c=c+1) begin
+                    expected_reply={expected_reply, $sformatf("%0d", golden[r][c])};
+                    if (c<n-1) expected_reply={expected_reply, " "};
+                end
+                expected_reply={expected_reply, "\r\n"};
+            end
+            expected_reply={expected_reply, "READY\r\n"};
+        end
+    endtask
+
+    task automatic run_block;
+        integer matrix_id, tile_id, r, c;
+        begin
+            @(negedge clk);
+            block_loads=0; block_results=0; block_finished=0;
+            block_load_cycle=-1; block_start_cycle=-1; block_first_cycle=-1; block_done_cycle=-1;
+            measure_block=1;
+            // Eight consecutive load handshakes: no artificial host/driver gaps.
+            for (matrix_id=0; matrix_id<2; matrix_id=matrix_id+1) begin
+                for (tile_id=0; tile_id<4; tile_id=tile_id+1) begin
+                    @(negedge clk);
+                    load_valid=1; load_matrix=(matrix_id!=0); load_tile_id=tile_id[1:0];
+                    for (r=0; r<4; r=r+1)
+                        for (c=0; c<4; c=c+1)
+                            load_tile_data[(4*r+c)*16 +: 16]=matrix_id ?
+                                b[4*(tile_id/2)+r][4*(tile_id%2)+c] :
+                                a[4*(tile_id/2)+r][4*(tile_id%2)+c];
+                    while (!load_ready) @(negedge clk);
+                    @(posedge clk);
+                end
+            end
+            @(negedge clk); load_valid=0; start=1;
+            @(negedge clk); start=0;
+            while (!block_finished) @(negedge clk);
+            measure_block=0;
+        end
+    endtask
+
+    task automatic send_byte(input reg [7:0] value);
+        begin
+            @(negedge clk); rx_data=value; rx_valid=1;
+            @(negedge clk); rx_valid=0;
+        end
+    endtask
+
+    task automatic send_text(input string text);
+        integer i;
+        begin
+            for (i=0; i<text.len(); i=i+1) send_byte(text[i]);
+        end
+    endtask
+
+    task automatic run_system;
+        integer matrix_id, r, c, matrix_rows, matrix_cols;
+        begin
+            @(negedge clk);
+            while (system_dut.state != system_dut.WAIT_M) @(negedge clk);
+            system_results=0; ascii_bytes=0; binary_finished=0; reply_finished=0;
+            input_complete_cycle=-1; tiles_loaded_cycle=-1; system_start_cycle=-1;
+            system_done_cycle=-1; cache_complete_cycle=-1; binary_ready_cycle=-1; reply_done_cycle=-1;
+            measure_system=1;
+            send_text($sformatf("M %0d %0d %0d\n", rows_m, inner_k, cols_n));
+            for (matrix_id=0; matrix_id<2; matrix_id=matrix_id+1) begin
+                matrix_rows=matrix_id ? inner_k : rows_m;
+                matrix_cols=matrix_id ? cols_n : inner_k;
+                for (r=0; r<matrix_rows; r=r+1) begin
+                    for (c=0; c<matrix_cols; c=c+1) begin
+                        if (matrix_id) send_text($sformatf("%0d", $signed(b[r][c])));
+                        else           send_text($sformatf("%0d", $signed(a[r][c])));
+                        send_byte(c==matrix_cols-1 ? 8'h0a : 8'h20);
+                    end
+                end
+            end
+            while (!reply_finished) @(negedge clk);
+            measure_system=0;
+            if (system_done_cycle-system_start_cycle != block_done_cycle-block_start_cycle)
+                $fatal(1, "Embedded and standalone accelerator latencies differ");
+        end
+    endtask
+
+    task automatic run_case(input string label, input integer m, k, n, input bit extreme);
+        begin
+            case_name=label;
+            prepare_case(m, k, n, extreme);
+            run_block();
+            run_system();
+            $display("\nCASE %s: A=%0dx%0d B=%0dx%0d", case_name, m, k, k, n);
+            show_time("ACCEL_START_TO_FIRST_VALID", block_first_cycle-block_start_cycle);
+            show_time("ACCEL_START_TO_DONE", block_done_cycle-block_start_cycle);
+            show_time("ACCEL_LOAD_TO_DONE", block_done_cycle-block_load_cycle);
+            show_time("SYSTEM_PACK_AND_LOAD", tiles_loaded_cycle-input_complete_cycle);
+            show_time("SYSTEM_ACCEL_START_OFFSET", system_start_cycle-input_complete_cycle);
+            show_time("SYSTEM_RESULTS_IN_RAM", cache_complete_cycle-input_complete_cycle);
+            show_time("SYSTEM_BINARY_TOTAL", binary_ready_cycle-input_complete_cycle);
+            show_time("SYSTEM_ASCII_ONLY", reply_done_cycle-binary_ready_cycle);
+            show_time("SYSTEM_TOTAL_NO_UART", reply_done_cycle-input_complete_cycle);
+            $display("  PASS: standalone C, cached C (64 values) and complete ASCII reply (%0d bytes)", ascii_bytes);
+        end
+    endtask
+
+    initial begin
+        repeat (4) @(negedge clk);
+        rst=0; reset_n=1;
+        $display("TIMING: 50 MHz, clock period %0d ns; UART bit transmission excluded.", CLK_PERIOD_NS);
+        run_case("signed_8x8", 8, 8, 8, 0);
+        run_case("signed16_max_sum_8x8", 8, 8, 8, 1);
+        // No intervening reset: a smaller job must not reuse old padded cells.
+        run_case("rectangular_3x5_by_5x7", 3, 5, 7, 0);
+        $display("\nALL TIMING CASES PASS");
+        $finish;
+    end
+
+    initial begin
+        #(CLK_PERIOD_NS*100000);
+        $fatal(1, "Timing test timeout: missing handshake, result, or READY");
+    end
+endmodule
+
+`default_nettype wire
+__MATMUL_EMBEDDED_FILE_17__
+
+cat > "$destination/run_timing.sh" <<'__MATMUL_EMBEDDED_FILE_18__'
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+
+build_dir="build/timing"
+mkdir -p -- "$build_dir"
+
+iverilog -g2012 -Wall -s tb_matmul_timing \
+    -o "$build_dir/tb_matmul_timing.vvp" \
+    rtl/accelerator/tile_bram.sv \
+    rtl/accelerator/tile_c4x4_1dsp.sv \
+    rtl/accelerator/matmul8x8_dataflow.sv \
+    rtl/accelerator/matmul8x8_top.sv \
+    rtl/matrix_uart.sv \
+    tb/tb_matmul_timing.sv
+
+vvp -N "$build_dir/tb_matmul_timing.vvp" | tee "$build_dir/timing.log"
+__MATMUL_EMBEDDED_FILE_18__
+
+chmod +x -- "$destination/run_timing.sh"
+
+printf 'Đã tạo 19 file project tại: %s\n' "$destination"
 printf 'Mở: %s/matmul.qpf (top-level/revision: matmul).\n' "$destination"
 printf 'UART: TX PIN_114/P1.7 -> RX adapter; RX PIN_24/P1.34 <- TX adapter; TTL 3.3 V, GND chung; 9600 8N1.\n'
 printf 'DIP3 OFF: DIP1 phát A; DIP2 nhận 0-9 và hiển thị DIG1. DIP2 ưu tiên hơn DIP1.\n'
@@ -2636,3 +3015,4 @@ printf 'Ví dụ 8x8 để copy/paste: %s/UART_MATRIX_EXAMPLE.md\n' "$destinatio
 printf 'Ứng dụng PC: %s/matrix_gui.py (cài requirements-gui.txt; xem README).\n' "$destination"
 printf 'GUI tự đồng bộ khi kết nối; bật DIP3 trước, chờ FPGA READY rồi gửi ma trận.\n'
 printf 'Accelerator: 4 module SystemVerilog gốc trong rtl/accelerator; cần biên dịch và nạp SOF mới.\n'
+printf 'Đo thời gian: bash "%s/run_timing.sh" (cần Icarus Verilog; log: build/timing/timing.log).\n' "$destination"
