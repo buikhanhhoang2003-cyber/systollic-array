@@ -342,6 +342,7 @@ __MATMUL_EMBEDDED_FILE_4__
 cat > "$destination/matmul.qsf" <<'__MATMUL_EMBEDDED_FILE_5__'
 # Board pinout/device settings: ../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf
 # Used ports only; board key_n[0] is named dip1_n in this top-level.
+# UART TX matches FPGA-UART-TX/PIN_114; RX uses board ext_clk_in/PIN_24.
 # Assignments are embedded so the project remains standalone.
 set_global_assignment -name TOP_LEVEL_ENTITY matmul
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.1.0
@@ -399,15 +400,12 @@ set_location_assignment PIN_124 -to {seg_n[6]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[6]}
 set_location_assignment PIN_127 -to {seg_n[7]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[7]}
+# TX matches UART_TX.qsf: P1 contact 7, also feeding the MAX3232 T1IN input.
 set_location_assignment PIN_114 -to uart_tx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
-set_location_assignment PIN_115 -to uart_rx
+# P1 contact 34: CLK2 is input-only and is used here as UART data input.
+set_location_assignment PIN_24 -to uart_rx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
-
-# Project input bias: released reset/DIP are high; disconnected UART RX idles high.
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to reset_n
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to dip1_n
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to uart_rx
 __MATMUL_EMBEDDED_FILE_5__
 
 cat > "$destination/matmul.sdc" <<'__MATMUL_EMBEDDED_FILE_6__'
@@ -439,7 +437,6 @@ def main():
     sources = []
     locations = {}
     standards = {}
-    pullups = set()
     for line in (root / "matmul.qsf").read_text().splitlines():
         words = shlex.split(line, comments=True)
         if not words:
@@ -463,15 +460,11 @@ def main():
             assert port not in locations, port
             locations[port] = int(words[1].removeprefix("PIN_"))
         else:
-            assert len(words) == 6 and words[1] == "-name" and words[4] == "-to", line
+            assert words[1:4] == ["-name", "IO_STANDARD", "3.3-V LVTTL"], line
+            assert words[4] == "-to" and len(words) == 6, line
             port = words[5].strip("{}")
-            if words[2] == "IO_STANDARD":
-                assert words[3] == "3.3-V LVTTL" and port not in standards, line
-                standards[port] = words[3]
-            else:
-                assert words[2:4] == ["WEAK_PULL_UP_RESISTOR", "ON"], line
-                assert port not in pullups, port
-                pullups.add(port)
+            assert port not in standards, port
+            standards[port] = words[3]
 
     assert globals_["FAMILY"] == "Cyclone IV E"
     assert globals_["DEVICE"] == "EP4CE6E22C8"
@@ -499,14 +492,13 @@ def main():
             ports.update(f"{name}[{i}]" for i in range(int(low), int(high) + 1))
         else:
             ports.add(name)
-    expected = dict(clk_50mhz=23, reset_n=25, dip1_n=88, uart_tx=114, uart_rx=115)
+    expected = dict(clk_50mhz=23, reset_n=25, dip1_n=88, uart_tx=114, uart_rx=24)
     for bus, pins in [("led_n", [87, 86, 85, 84]),
                       ("digit_n", [133, 135, 136, 137]),
                       ("seg_n", [128, 121, 125, 129, 132, 126, 124, 127])]:
         expected.update({f"{bus}[{i}]": pin for i, pin in enumerate(pins)})
     assert ports == set(expected) == set(locations) == set(standards)
     assert locations == expected
-    assert pullups == {"reset_n", "dip1_n", "uart_rx"}
     assert len(set(locations.values())) == len(ports) == 21
     print("PASS: 21 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
     print("      device/revision/top match; 4 HDL files and SDC exist.")
@@ -526,7 +518,10 @@ là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 
 `matmul.qsf` lấy trực tiếp cấu hình device và các gán chân đang dùng từ
 **`../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf`** theo yêu cầu.
-Chỉ đổi tên cổng `key_n[0]` của file board thành `dip1_n` trong top-level.
+Đổi tên cổng `key_n[0]` của file board thành `dip1_n` trong top-level.
+TX dùng **PIN_114** giống `../FPGA-UART-TX/UART_TX.qsf`.
+Ví dụ đó chỉ phát TX, không có cổng RX; project bổ sung RX tại
+`ext_clk_in/PIN_24` của file board để tránh ngõ ra MAX3232 ở PIN_115.
 Các assignment được nhúng vào QSF của project; không cần file board khi
 chép project hoặc dùng `create_matmul.sh` trên máy khác. Không import các
 ngoại vi không dùng như SDRAM, LCD, VGA hay I2C.
@@ -572,57 +567,53 @@ mở `matmul.qpf`, hoặc chạy `python3 ./matmul/check_project.py` để kiể
 Nội dung nhúng là bản chụp tại lúc tạo script; sửa HDL sau đó không tự cập
 nhật nội dung script.
 
-## Nối UART trực tiếp và kiểm tra MAX3232 trước khi nối
+## Nối UART theo chân TX của FPGA-UART-TX
 
-Sơ đồ kết nối TTL 3.3 V, sau khi đã xác minh/cô lập nhánh nhận onboard:
+Nối TX của FPGA theo đúng ví dụ tại PIN_114. Nếu đã nối TX ở PIN_111,
+chuyển dây sang PIN_114; dây RX của FPGA vẫn dùng PIN_24:
 
-| Board/FPGA | USB-to-UART TTL 3.3 V |
-|---|---|
-| **PIN_114**, TX của FPGA | RX của adapter |
-| **PIN_115**, RX của FPGA | TX của adapter |
-| GND | GND |
+| Chức năng | Chân FPGA | Chân đầu nối P1 | USB-to-UART TTL 3.3 V |
+|---|---|---|---|
+| TX của FPGA | **PIN_114** | **P1 chân 7** | RX của adapter |
+| RX của FPGA | **PIN_24** | **P1 chân 34** | TX của adapter |
+| GND | GND | P1 chân 1 hoặc 2 | GND |
 
 Cấp nguồn board bằng nguồn của board. Không nối dây VCC/5 V của adapter.
 Đây là chân mức logic TTL, không nối tín hiệu điện áp RS-232 từ DB9 vào FPGA.
-Các số 114/115 là số chân FPGA; cần đối chiếu net ở đầu nối mở rộng, không
-coi đó là số thứ tự chân trên header.
+Số chân FPGA và số chân header khác nhau: **PIN_24 là P1 chân 34**, không
+phải P1 chân 24. Xác định đúng chân 1 của P1 trên PCB trước khi đếm chân.
+Các chân nguồn nằm gần cuối header, không nối nhầm RX vào nguồn.
 
-**Điểm cần xử lý trước khi nối TX adapter vào PIN_115:** schematic được cung
-cấp là **V2.1**, trang duy nhất, khối “RS232 Serial port”. Trong đó:
+`FPGA-UART-TX/UART_TX.qsf` gán `tx` vào PIN_114 và không có RX.
+Khối “IO interface” trong schematic V2.1 xác nhận PIN_114 ra P1.7,
+PIN_24 ra P1.34. `cyclone_iv_board_v3.qsf` cũng khai báo PIN_24 là
+`ext_clk_in`; bảng chân chip xác nhận chân 24 là ngõ vào CLK2.
+PIN_24 chỉ nhận dữ liệu UART, clock hệ thống vẫn là PIN_23.
 
-- Net `UART_TXD` nối **U4 MAX3232E, chân 11 T1IN**; đây là đầu vào U4,
-  cùng net với TX FPGA theo bảng chân.
-- Net `UART_RXD` nối trực tiếp **U4, chân 12 R1OUT**; đây là đầu ra U4,
-  cùng net với RX FPGA/PIN_115 theo bảng chân.
-- Nhánh **R1OUT → UART_RXD không có jumper hoặc điện trở nối tiếp** được vẽ.
-  C41–C44 thuộc mạch nguồn/bơm điện tích, không phải phần tử ngắt RX.
-
-Vì vậy, nếu PCB V3.0 thực tế vẫn nối như schematic, TX adapter và R1OUT
-của U4 sẽ cùng điều khiển PIN_115. **Rút cáp DB9 không có nghĩa là đã cô lập
-R1OUT.** Điểm cần cô lập về điện là **U4.12 khỏi net UART_RXD/PIN_115**,
-đồng thời giữ đường adapter → PIN_115.
-
-Tài liệu không có layout đường đồng hoặc jumper ngắt nhánh này, nên chưa
-thể chỉ vị trí cắt mạch, linh kiện cần tháo hoặc thao tác cơ khí cụ thể.
-Hãy tắt nguồn và đo thông mạch trên đúng PCB V3.0 để xác minh U4.12–PIN_115,
-rồi xác định cách cô lập dựa trên board thực tế trước khi nối TX adapter.
-Chưa có phép đo hoặc kiểm tra phần cứng thực tế trong lần sửa này.
+Trong schematic, PIN_114 đồng thời nối **T1IN/U4.11**, là đầu vào MAX3232:
+FPGA có thể phát cho RX adapter và đầu vào U4 cùng lúc.
+**Không nối TX adapter vào PIN_115**, vì chân đó nối đầu ra **R1OUT/U4.12**.
+RX của project dùng PIN_24, không nối MAX3232 trong schematic; không cần
+cắt mạch hoặc tháo U4 để dùng đường RX này.
+Chưa đo thông mạch trên PCB V3.0 thực tế; kiểm tra đúng nhãn/header nếu PCB
+của bạn khác sơ đồ V2.1. Khi dùng, adapter phải giữ RX ở idle mức 1;
+nếu để RX rời khỏi adapter, có thể thêm điện trở ngoài 10 kΩ kéo RX lên 3.3 V.
 
 ## Chân và cực tính
 
 Tất cả 21 chân dùng **3.3-V LVTTL**, không trùng chân. Các chân không dùng
 được đặt **AS INPUT TRI-STATED** theo file board đã chỉ định. Các thiết lập
 NCEO, INIT_DONE, DEV_OE và DEV_CLRn lấy theo file đó; DEV_OE/DEV_CLRn tắt
-để sử dụng chân 86/87 cho LED. Project bổ sung pull-up yếu cho RESET, DIP1
-và UART RX để các đầu vào này ở mức 1 khi không có nguồn tín hiệu kéo xuống.
-Pull-up RX không cô lập được ngõ ra MAX3232.
+để sử dụng chân 86/87 cho LED. Không đặt `WEAK_PULL_UP_RESISTOR` trong QSF:
+Fitter báo lỗi 169057 với thiết lập này ở chân RESET/DIP1. Board có điện trở
+kéo lên ngoài cho RESET và DIP1; adapter điều khiển mức idle của UART RX.
 
 | Cổng HDL | Chức năng | Chân FPGA |
 |---|---|---|
 | `clk_50mhz` | Clock 50 MHz | 23 |
 | `reset_n` | Reset, nhấn = 0 | 25 |
 | `dip1_n` | DIP1 / KEY1, ON = 0 | 88 |
-| `uart_tx`, `uart_rx` | TX, RX | 114, 115 |
+| `uart_tx`, `uart_rx` | TX, RX qua P1.7/P1.34 | 114, 24 |
 | `led_n[0]` … `led_n[3]` | LED1 … LED4 | 87, 86, 85, 84 |
 | `digit_n[0]` … `digit_n[3]` | DIG1 … DIG4 | 133, 135, 136, 137 |
 | `seg_n[0]` … `seg_n[7]` | a, b, c, d, e, f, g, dp | 128, 121, 125, 129, 132, 126, 124, 127 |
@@ -633,8 +624,8 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
 Đối chiếu nguồn tài liệu:
 
 1. `../Altera-Cyclone-IV-board-V3.0/Hardware documentation/Development board pin information.pdf`,
-   trang 1–3: clock, reset, KEY/DIP chung chân, LED, UART và LED 7 đoạn khớp
-   bảng gán trên.
+   trang 1–3: clock, reset, KEY/DIP chung chân, LED và LED 7 đoạn khớp bảng
+   gán trên; TX là chân UART 114, RX được chủ động đổi sang chân mở rộng 24.
 2. `Hardware documentation/Development board schematic diagram V2.1.pdf`,
    khối “Crystal and reset”, “Digital Tube”, “Button, LED, DIP switch”,
    “RS232 Serial port”: reset kéo lên 3.3 V, nút nhấn/DIP kéo xuống GND,
@@ -658,8 +649,10 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
    Không đổi chân segment. Nếu thay đổi gán chân QSF,
    cập nhật bảng kỳ vọng tương ứng trong `check_project.py`.
 5. `../FPGA-UART-TX/UART_TX.qsf` và `README.md` xác nhận clock chân 23,
-   TX chân 114 và ví dụ dùng 5208 clock/bit. Mã ví dụ không được sao chép
-   nguyên vì cần bổ sung reset, RX và logic tuần tự phù hợp.
+   TX chân 114, KEY1 chân 88, LED1–LED4 ở 87–84 và 5208 clock/bit.
+   Project giữ các chân đang dùng đó. RX chân 24 là phần bổ sung vì ví dụ
+   không có bộ nhận. Mã ví dụ không được sao chép nguyên vì cần bổ sung
+   reset, RX và logic tuần tự phù hợp.
 6. `Cyclone IV chip/EP4CE6 pin information.pdf`: chân E144 86/87 có chức
    năng tùy chọn DEV_OE/DEV_CLRn; chúng được tắt trong QSF.
    `Dev Board Manual.pdf` yêu cầu các chân chưa dùng ở trạng thái tri-state.
@@ -798,7 +791,7 @@ Theo yêu cầu, **không chạy Icarus, mô phỏng, biên dịch hoặc kiểm
 cho phiên bản HDL/QSF hiện tại. Không có xác nhận hoạt động trên board thật.
 Kết quả mô phỏng các bản trước không được dùng để kết luận bản sửa này đạt.
 
-`check_project.py` đã được cập nhật theo gán chân và pull-up hiện tại,
+`check_project.py` đã được cập nhật theo gán chân UART mới và bỏ pull-up nội,
 nhưng không chạy trong lần sửa này. Nếu sau này cần kiểm tra tĩnh bằng
 Python 3.9 trở lên, có thể chạy thủ công:
 
@@ -811,9 +804,9 @@ Chưa tạo SOF cho bản sửa này. Cần biên dịch lại project và nạp
 hướng dẫn ở trên; script shell chỉ tạo file nguồn và cấu hình.
 
 Chưa xác minh kết nối và thứ tự LED/digit bằng PCB V3.0 thực tế.
-Đặc biệt, phải giải quyết xung đột **U4.12 ↔ PIN_115** trước khi nối TX adapter.
+Cần nối **TX=P1.7, RX=P1.34**, rồi biên dịch và nạp SOF mới.
 __MATMUL_EMBEDDED_FILE_8__
 
 printf 'Đã tạo 9 file project tại: %s\n' "$destination"
 printf 'Mở: %s/matmul.qpf (top-level/revision: matmul).\n' "$destination"
-printf 'Đọc README.md, đặc biệt nhánh MAX3232 nối với PIN_115, trước khi nối UART.\n'
+printf 'UART: TX PIN_114/P1.7 -> RX adapter; RX PIN_24/P1.34 <- TX adapter; TTL 3.3 V, GND chung.\n'
