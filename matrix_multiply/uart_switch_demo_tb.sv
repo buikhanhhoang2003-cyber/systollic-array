@@ -27,6 +27,13 @@ always @(negedge uart_tx)
     if (reset_n && expect_tx_idle)
         $fatal(1, "UART transmitted while switch 1 was off");
 
+always @(negedge clk) begin
+    if (led_n[3:2] !== 2'b11)
+        $fatal(1, "LED3/LED4 must stay off, got %b", led_n);
+    if (!reset_n && led_n !== 4'b1111)
+        $fatal(1, "Reset must turn all four LEDs off");
+end
+
 task send_frame;
     input [7:0] data;
     input stop_bit;
@@ -94,6 +101,13 @@ endtask
 
 initial begin
     // Power-up reset also works without pressing the reset button.
+    #1;
+    check_leds(4'b1111);
+    repeat (4) begin
+        @(posedge clk);
+        #1;
+        check_leds(4'b1111);
+    end
     #400;
     check_blank;
     check_leds(4'b1111);
@@ -217,7 +231,7 @@ initial begin
     send_frame(8'h34, 1'b1);
     check_display(8'h99);
 
-    $display("PASS: startup, all switch/LED combinations, digits 0-9, simultaneous TX/RX, invalid frames and reset");
+    $display("PASS: LEDs off from startup, LED3/LED4 always off, all switch/LED combinations, digits 0-9, simultaneous TX/RX, invalid frames and reset");
     $finish;
 end
 
@@ -226,3 +240,4 @@ initial begin
     $fatal(1, "Simulation timed out");
 end
 endmodule
+
