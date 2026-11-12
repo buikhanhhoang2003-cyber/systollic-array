@@ -82,8 +82,10 @@ module matmul (
             mode_rx <= 1'b1;
     end
 
-    assign led_n = !reset_sync ? 4'b1111 :
-                   mode_rx ? 4'b1101 : 4'b1110;
+    // Small onboard LEDs are active low: PIN_87 = TX mode, PIN_86 = RX mode.
+    assign led_n[0] = reset_sync ? mode_rx : 1'b1;
+    assign led_n[1] = reset_sync ? !mode_rx : 1'b1;
+    assign led_n[3:2] = 2'b11;
 
     uart_tx u_tx (
         .clk(clk_50mhz),
@@ -133,7 +135,7 @@ module matmul (
         .clk(clk_50mhz),
         .reset_n(reset_sync),
         .enable(mode_rx),
-        .digits(digits),
+        .digit(digits[3:0]),
         .digit_n(digit_n),
         .seg_n(seg_n)
     );
@@ -301,29 +303,18 @@ __MATMUL_EMBEDDED_FILE_2__
 
 cat > "$destination/rtl/sevenseg_scan.v" <<'__MATMUL_EMBEDDED_FILE_3__'
 module sevenseg_scan (
-    input  wire        clk,
-    input  wire        reset_n,
-    input  wire        enable,
-    input  wire [15:0] digits,
-    output reg   [3:0] digit_n,
-    output reg   [7:0] seg_n
+    input  wire       clk,
+    input  wire       reset_n,
+    input  wire       enable,
+    input  wire [3:0] digit,
+    output reg  [3:0] digit_n,
+    output reg  [7:0] seg_n
 );
-    reg [15:0] scan_count;
-    reg [1:0] digit_index;
-    reg [3:0] value;
     reg [7:0] segments;
 
-    // V2.1 schematic: DIG1 is rightmost, DIG4 is leftmost.
     always @* begin
-        case (digit_index)
-            2'd0: value = digits[3:0];
-            2'd1: value = digits[7:4];
-            2'd2: value = digits[11:8];
-            2'd3: value = digits[15:12];
-            default: value = 4'd0;
-        endcase
         // {dp,g,f,e,d,c,b,a}, common anode; decimal point stays off.
-        case (value)
+        case (digit)
             4'd0: segments = 8'hc0;
             4'd1: segments = 8'hf9;
             4'd2: segments = 8'ha4;
@@ -340,30 +331,15 @@ module sevenseg_scan (
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            scan_count <= 16'd0;
-            digit_index <= 2'd0;
             digit_n <= 4'b1111;
             seg_n <= 8'hff;
         end else if (!enable) begin
-            scan_count <= 16'd0;
-            digit_index <= 2'd0;
             digit_n <= 4'b1111;
             seg_n <= 8'hff;
         end else begin
-            // 1 ms per digit: turn off, wait 5 us, load, wait 5 us, turn on.
-            if (scan_count == 16'd0)
-                digit_n <= 4'b1111;
-            if (scan_count == 16'd250)
-                seg_n <= segments;
-            if (scan_count == 16'd500)
-                digit_n <= ~(4'b0001 << digit_index);
-
-            if (scan_count == 16'd49999) begin
-                scan_count <= 16'd0;
-                digit_index <= digit_index + 1'b1;
-            end else begin
-                scan_count <= scan_count + 1'b1;
-            end
+            // V2.1 schematic: the leftmost digit is DIG4, on PIN_137.
+            digit_n <= 4'b0111;
+            seg_n <= segments;
         end
     end
 endmodule
@@ -403,7 +379,8 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
 set_location_assignment PIN_115 -to uart_rx
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
 
-# led_n[0..3] follows the pin table and vendor LED examples.
+# Small LEDs: led_n[0]/PIN_87 = mode 1, led_n[1]/PIN_86 = mode 2, active low.
+# led_n[2..3] stays off.
 set_location_assignment PIN_87 -to {led_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[0]}
 set_location_assignment PIN_86 -to {led_n[1]}
@@ -549,6 +526,13 @@ Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**, Verilog-2001.
 Mở **`matmul.qpf`** bằng Quartus Prime Lite 21.1; revision và top-level đều
 là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 
+Theo yêu cầu hiện tại, chỉ **digit đầu tiên bên trái** của cụm LED 7 đoạn
+hiển thị số; ba digit còn lại luôn tắt. LED báo mode là **LED nhỏ LED1/PIN_87
+cho mode 1 và LED2/PIN_86 cho mode 2 trên board**, tách biệt với cụm LED
+7 đoạn. Cả hai sáng ở mức 0; trong reset cả hai tắt. LED3/LED4 luôn tắt.
+Một digit chỉ hiện hàng đơn vị:
+nhập `1234` thì thấy `4`, nhập tiếp `5` thì thấy `5`.
+
 ## Các file
 
 | File | Chức năng |
@@ -556,7 +540,7 @@ là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 | `rtl/matmul.v` | Top-level, đồng bộ reset/DIP, chống dội, chọn mode, xử lý số |
 | `rtl/uart_tx.v` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
 | `rtl/uart_rx.v` | Đồng bộ RX hai FF, xác nhận start, lấy mẫu giữa bit, kiểm tra stop |
-| `rtl/sevenseg_scan.v` | Giải mã số, quét bốn digit và khoảng tắt chống bóng mờ |
+| `rtl/sevenseg_scan.v` | Giải mã một chữ số, chỉ bật digit đầu tiên bên trái |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
 | `check_project.py` | Tự kiểm tra tĩnh cổng/chân, I/O, device và file nguồn |
@@ -654,11 +638,12 @@ LED đơn sáng khi xuất 0. LED 7 đoạn common-anode: chọn digit và segme
    **DIG2 → Q2 → D3 (chân 8)**, **DIG3 → Q3 → D2 (chân 9)**,
    **DIG4 → Q4 → D1 (chân 12)**. Vì vậy dùng thứ tự trái sang phải
    **DIG4, DIG3, DIG2, DIG1 = 137, 136, 135, 133**.
-   `digit_n[0]` hiển thị hàng đơn vị, `digit_n[3]` hàng nghìn.
-   Đây là thứ tự theo schematic V2.1, chưa xác nhận bằng board V3.0 thực tế.
-   Nếu thử `1234` mà thấy `4321`, đảo bốn gán chân digit trong QSF:
-   `[0]=137, [1]=136, [2]=135, [3]=133`; giữ nguyên các chân segment.
-   Khi cố ý đổi ánh xạ, cập nhật bảng kỳ vọng tương ứng trong `check_project.py`.
+   Project chỉ bật **DIG4/PIN_137**, tức `digit_n[3] = 0`, để dùng digit
+   đầu tiên bên trái. DIG1–DIG3 luôn tắt. Đây là vị trí theo schematic V2.1,
+   chưa xác nhận bằng board V3.0 thực tế. Nếu digit mong muốn trên PCB thực
+   tế là DIG1/PIN_133, đổi `digit_n <= 4'b0111` thành `4'b1110` trong
+   `rtl/sevenseg_scan.v`; không đổi chân segment. Nếu thay đổi gán chân QSF,
+   cập nhật bảng kỳ vọng tương ứng trong `check_project.py`.
 5. `../FPGA-UART-TX/UART_TX.qsf` và `README.md` xác nhận clock chân 23,
    TX chân 114 và ví dụ dùng 5208 clock/bit. Mã ví dụ không được sao chép
    nguyên vì cần bổ sung reset, RX và logic tuần tự phù hợp.
@@ -671,10 +656,10 @@ nhấn giữ KEY1 cũng có thể yêu cầu mode 1 sau thời gian chống dộ
 
 ## Hành vi
 
-| DIP1 ổn định | LED | UART | LED 7 đoạn |
+| DIP1 ổn định | LED nhỏ trên board | UART | LED 7 đoạn |
 |---|---|---|---|
 | ON = 0, mode 1 | LED1 sáng; LED2–4 tắt | Gửi `AAAAAA…`, không CR/LF | Tắt cả digit và segment |
-| OFF = 1, mode 2 | LED2 sáng; LED1/3/4 tắt | TX idle = 1, nhận RX, không echo | Ban đầu `0000`, cập nhật khi nhận số |
+| OFF = 1, mode 2 | LED2 sáng; LED1/3/4 tắt | TX idle = 1, nhận RX, không echo | Digit đầu tiên hiện `0`, cập nhật chữ số hàng đơn vị; ba digit còn lại tắt |
 
 Sau hai FF đồng bộ, DIP phải khác mode yêu cầu liên tục **1.000.000 clock
 = 20 ms** mới được chấp nhận. Khi chuyển từ mode 1 sang mode 2, TX hoàn tất
@@ -683,17 +668,19 @@ frame đang chạy trước khi LED2 sáng và mode 2 có hiệu lực; độ tr
 
 Quy tắc nhập trong mode 2:
 
-- Chỉ ASCII `0`…`9` được ghép vào số; luôn giữ bốn chữ số cuối.
-  `1234` → `1234`, nhập tiếp `5` → `2345`.
+- Chỉ ASCII `0`…`9` được ghép vào số. Vẫn giữ bốn chữ số cuối trong bộ nhớ
+  để Backspace/Delete khôi phục chữ số trước, nhưng chỉ hiển thị hàng đơn vị.
+  `1234` → hiện `4`, nhập tiếp `5` → hiện `5` (bộ nhớ lần lượt `1234`, `2345`).
 - CR (`0x0D`), LF (`0x0A`) hoặc CRLF giữ số hiện tại và đánh dấu số mới.
-  `1234`, Enter, `5` → `0005`. Enter liên tiếp cũng giữ nguyên số.
+  `1234`, Enter → vẫn hiện `4`; nhập `5` → hiện `5` (bộ nhớ `0005`).
+  Enter liên tiếp cũng giữ nguyên số.
 - Backspace (`0x08`) hoặc Delete (`0x7F`) dịch phải một chữ số,
-  thêm 0 bên trái: `1234` → `0123` → `0012`.
+  thêm 0 bên trái: bộ nhớ `1234` → `0123` → `0012`, hiển thị `4` → `3` → `2`.
   Enter vẫn đánh dấu số mới cho đến chữ số tiếp theo, kể cả nếu xen
   Backspace/Delete hoặc ký tự bị bỏ qua.
 - Ký tự khác bị bỏ qua; dấu âm và dấu thập phân không được diễn giải.
-  Ví dụ `-1.2` chỉ có hai chữ số hợp lệ, kết quả `0012`.
-- Vào mode 1 xóa số và trạng thái Enter; trở lại mode 2 là `0000`.
+  Ví dụ `-1.2` chỉ có hai chữ số hợp lệ, bộ nhớ `0012`, hiển thị `2`.
+- Vào mode 1 xóa số và trạng thái Enter; trở lại mode 2 hiện `0`.
 
 UART chạy **9600 baud, 8 data bits, no parity, 1 stop bit, LSB trước,
 idle 1**, không flow control. Bộ đếm dùng **5208 clock/bit**,
@@ -706,13 +693,14 @@ hoặc sau lỗi stop, RX đợi mức 1 liên tục một bit trước khi nh�
 Nên để terminal/adapter idle ít nhất 1 ms sau khi LED2 sáng rồi nhập.
 
 Tất cả logic dùng cạnh lên của clock 50 MHz, không tạo clock chia mới.
-Bốn digit được quét mỗi digit 1 ms, toàn màn hình **250 Hz**. Mỗi lần đổi
-digit: tắt digit, đợi 5 µs, đổi segment, đợi thêm 5 µs rồi bật digit mới.
-Mỗi digit phản ánh dữ liệu mới ở lượt quét tiếp theo, trong khoảng 4 ms.
+Chỉ một digit được bật cố định trong mode 2, không cần quét chuyển digit.
+Mã segment cập nhật theo clock khi nhận dữ liệu mới. Ba digit còn lại luôn
+được xuất mức 1 để tắt; dấu chấm luôn tắt. Trong mode 1/reset, cả bốn digit
+và toàn bộ segment đều tắt.
 
 Nhấn RESET kéo thấp gây reset bất đồng bộ. Nhả RESET qua hai FF đồng bộ
 trước khi logic hoạt động. Trong reset, TX idle, LED và hiển thị tắt.
-Sau nhả reset, mặc định vào RX/`0000`; nếu DIP1 ON, sau khoảng 20 ms
+Sau nhả reset, mặc định vào RX/hiện `0`; nếu DIP1 ON, sau khoảng 20 ms
 sẽ vào mode 1. Cần nhấn rồi nhả RESET sau mỗi lần nạp.
 
 ## Biên dịch và nạp bằng Quartus Prime Lite 21.1
@@ -752,17 +740,20 @@ Local echo không thay đổi dữ liệu FPGA nhận hay số trên LED.
 1. **DIP1 ON:** sau khoảng 20 ms LED1 sáng, LED khác tắt, toàn bộ LED
    7 đoạn tắt. PC nhận `AAAAAA…` liên tục, không thêm xuống dòng.
 2. **DIP1 OFF:** sau chống dội và frame TX cuối, LED2 sáng, terminal dừng
-   nhận `A`, hiển thị `0000`. Chờ ít nhất 1 ms trước khi gõ.
-3. Gõ `1234` → `1234`; gõ `5` → `2345`; nhấn Enter → giữ `2345`;
-   gõ `5` → `0005`. Thử terminal gửi Enter dưới dạng CR, LF rồi CRLF.
-4. Nhập số mới `1234`; Backspace → `0123`; Delete → `0012`.
+   nhận `A`, digit đầu tiên hiện `0`, ba digit còn lại tắt.
+   Chờ ít nhất 1 ms trước khi gõ.
+3. Gõ `1234` → lần lượt hiện `1`, `2`, `3`, `4`; gõ `5` → hiện `5`;
+   nhấn Enter → giữ `5`; gõ `6` → hiện `6` (bộ nhớ `0006`).
+   Thử terminal gửi Enter dưới dạng CR, LF rồi CRLF.
+4. Nhập số mới `1234`; Backspace → hiện `3`; Delete → hiện `2`.
    Nếu phím Delete gửi chuỗi escape thay vì byte `0x7F`, dùng tính năng
    gửi byte của terminal để thử đúng mã. Chỉ các byte `0x08`/`0x7F` mới xóa.
 5. Gửi `abc!?` → số giữ nguyên. Kiểm tra `0`…`9`, dấu chấm tắt,
-   đủ bốn vị trí và đúng thứ tự trái sang phải.
-6. Chuyển ON rồi OFF → `0000`. Thử bật/tắt nhanh hơn 20 ms: mode chỉ đổi
+   chỉ vị trí đầu tiên bên trái sáng, ba vị trí còn lại tắt. LED nhỏ LED1/LED2
+   báo mode, không dùng digit 7 đoạn làm đèn báo mode.
+6. Chuyển ON rồi OFF → hiện `0`. Thử bật/tắt nhanh hơn 20 ms: mode chỉ đổi
    khi mức mới ổn định đủ thời gian. Không dùng KEY1 như nút riêng.
-7. Nhấn giữ RESET: TX idle, tất cả LED tắt; nhả RESET: `0000` trong RX,
+7. Nhấn giữ RESET: TX idle, tất cả LED tắt; nhả RESET: hiện `0` trong RX,
    hoặc tự chuyển sang TX sau chống dội nếu DIP1 vẫn ON.
 
 ## Kiểm chứng đã thực hiện và giới hạn
