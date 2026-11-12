@@ -17,8 +17,9 @@ if ! mkdir -- "$destination"; then
     exit 1
 fi
 mkdir -- "$destination/rtl"
+mkdir -- "$destination/rtl/accelerator"
 
-cat > "$destination/rtl/matmul.v" <<'__MATMUL_EMBEDDED_FILE_0__'
+cat > "$destination/rtl/matmul.sv" <<'__MATMUL_EMBEDDED_FILE_0__'
 module matmul (
     input  wire       clk_50mhz,
     input  wire       reset_n,
@@ -162,7 +163,7 @@ module matmul (
 endmodule
 __MATMUL_EMBEDDED_FILE_0__
 
-cat > "$destination/rtl/uart_tx.v" <<'__MATMUL_EMBEDDED_FILE_1__'
+cat > "$destination/rtl/uart_tx.sv" <<'__MATMUL_EMBEDDED_FILE_1__'
 module uart_tx (
     input  wire       clk,
     input  wire       reset_n,
@@ -210,7 +211,7 @@ module uart_tx (
 endmodule
 __MATMUL_EMBEDDED_FILE_1__
 
-cat > "$destination/rtl/uart_rx.v" <<'__MATMUL_EMBEDDED_FILE_2__'
+cat > "$destination/rtl/uart_rx.sv" <<'__MATMUL_EMBEDDED_FILE_2__'
 `timescale 1ns / 1ps
 
 module uart_rx (
@@ -294,7 +295,7 @@ module uart_rx (
 endmodule
 __MATMUL_EMBEDDED_FILE_2__
 
-cat > "$destination/rtl/sevenseg_scan.v" <<'__MATMUL_EMBEDDED_FILE_3__'
+cat > "$destination/rtl/sevenseg_scan.sv" <<'__MATMUL_EMBEDDED_FILE_3__'
 module sevenseg_scan (
     input  wire       clk,
     input  wire       reset_n,
@@ -364,17 +365,16 @@ cat > "$destination/matmul.qsf" <<'__MATMUL_EMBEDDED_FILE_5__'
 set_global_assignment -name TOP_LEVEL_ENTITY matmul
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.1.0
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
-set_global_assignment -name VERILOG_INPUT_VERSION VERILOG_2001
 set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
-set_global_assignment -name VERILOG_FILE rtl/matmul.v
-set_global_assignment -name VERILOG_FILE rtl/uart_tx.v
-set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
-set_global_assignment -name VERILOG_FILE rtl/sevenseg_scan.v
-set_global_assignment -name VERILOG_FILE rtl/matrix_uart.v
-set_global_assignment -name VERILOG_FILE rtl/matmul8x8_top.v
-set_global_assignment -name VERILOG_FILE rtl/matmul8x8_dataflow.v
-set_global_assignment -name VERILOG_FILE rtl/tile_c4x4_1dsp.v
-set_global_assignment -name VERILOG_FILE rtl/tile_bram.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/matmul.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/uart_tx.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/uart_rx.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sevenseg_scan.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/matrix_uart.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/accelerator/matmul8x8_top.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/accelerator/matmul8x8_dataflow.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/accelerator/tile_c4x4_1dsp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/accelerator/tile_bram.sv
 set_global_assignment -name SDC_FILE matmul.sdc
 
 # Device and I/O assignments taken from the board QSF.
@@ -464,6 +464,7 @@ def main():
     root = Path(__file__).resolve().parent
     globals_ = {}
     sources = []
+    systemverilog_sources = set()
     locations = {}
     standards = {}
     for line in (root / "matmul.qsf").read_text().splitlines():
@@ -478,8 +479,10 @@ def main():
         assert not any(c in line for c in "$;"), line
         if command == "set_global_assignment":
             assert words[1] == "-name" and len(words) == 4, line
-            if words[2] == "VERILOG_FILE":
+            if words[2] in {"VERILOG_FILE", "SYSTEMVERILOG_FILE"}:
                 sources.append(words[3])
+                if words[2] == "SYSTEMVERILOG_FILE":
+                    systemverilog_sources.add(words[3])
             else:
                 assert words[2] not in globals_, line
                 globals_[words[2]] = words[3]
@@ -498,7 +501,6 @@ def main():
     assert globals_["FAMILY"] == "Cyclone IV E"
     assert globals_["DEVICE"] == "EP4CE6E22C8"
     assert globals_["TOP_LEVEL_ENTITY"] == "matmul"
-    assert globals_["VERILOG_INPUT_VERSION"] == "VERILOG_2001"
     assert globals_["STRATIX_DEVICE_IO_STANDARD"] == "3.3-V LVTTL"
     assert globals_["RESERVE_ALL_UNUSED_PINS"] == "AS INPUT TRI-STATED"
     assert globals_["RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP"] == "AS INPUT TRI-STATED"
@@ -509,11 +511,25 @@ def main():
                          (root / "matmul.qpf").read_text()).group(1)
     assert revision == "matmul" and (root / (revision + ".qsf")).is_file()
     assert len(sources) == len(set(sources)) == 9
+    assert systemverilog_sources == {
+        "rtl/matmul.sv",
+        "rtl/uart_tx.sv",
+        "rtl/uart_rx.sv",
+        "rtl/sevenseg_scan.sv",
+        "rtl/matrix_uart.sv",
+        "rtl/accelerator/matmul8x8_top.sv",
+        "rtl/accelerator/matmul8x8_dataflow.sv",
+        "rtl/accelerator/tile_c4x4_1dsp.sv",
+        "rtl/accelerator/tile_bram.sv",
+    }
     assert all((root / path).is_file() for path in sources)
-    assert set(sources) == {str(p.relative_to(root)) for p in (root / "rtl").glob("*.v")}
+    assert set(sources) == {
+        str(p.relative_to(root))
+        for pattern in ("*.v", "*.sv") for p in (root / "rtl").rglob(pattern)
+    }
     assert (root / globals_["SDC_FILE"]).is_file()
 
-    header = (root / "rtl/matmul.v").read_text().split(");", 1)[0]
+    header = (root / "rtl/matmul.sv").read_text().split(");", 1)[0]
     assert re.search(r"module\s+matmul\s*\(", header)
     ports = set()
     for _, high, low, name in re.findall(
@@ -533,7 +549,7 @@ def main():
     assert locations == expected
     assert len(set(locations.values())) == len(ports) == 23
     print("PASS: 23 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
-    print("      device/revision/top match; 9 HDL files and SDC exist.")
+    print("      device/revision/top match; 9 SystemVerilog files and SDC exist.")
     print("Static checks only: HDL compilation, simulation and timing are not checked.")
 
     pin_report = root / globals_["PROJECT_OUTPUT_DIRECTORY"] / (revision + ".pin")
@@ -564,7 +580,8 @@ __MATMUL_EMBEDDED_FILE_7__
 cat > "$destination/README.md" <<'__MATMUL_EMBEDDED_FILE_8__'
 # UART và nhân ma trận — Cyclone IV V3.0
 
-Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**, Verilog-2001.
+Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**. Toàn bộ HDL dùng
+**SystemVerilog (`.sv`)**; lõi tăng tốc giữ nguyên bốn module gốc.
 Mở **`matmul.qpf`** bằng Quartus Prime Lite 21.1; revision và top-level đều
 là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
 
@@ -656,15 +673,31 @@ Không xuất nội dung RAM cũ sau reset hoặc sau khi hủy phép nhân.
 Đã đọc `README.txt`, bốn module RTL và testbench của repo tham khảo
 `../matmul8x8_4core_tile4x4`. Project nhúng các module đã port, không phụ thuộc
 đường dẫn repo đó khi biên dịch hoặc chạy `create_matmul.sh` trên máy khác.
-Repo tham khảo được giữ nguyên. Bốn file `.sv` được chuyển sang **Verilog-2001
-`.v`**: FSM dùng localparam/reg, không dùng logic/always_ff/enum hoặc cast
-SystemVerilog; các liên kết giữa core được trải phẳng thành bus.
+Repo tham khảo được giữ nguyên. **Bốn file accelerator được chép nguyên nội
+dung**, giữ đúng tên module, cổng, FSM, mảng liên kết, forwarding và pipeline:
+
+```text
+rtl/accelerator/
+├── matmul8x8_top.sv
+├── matmul8x8_dataflow.sv
+├── tile_c4x4_1dsp.sv
+└── tile_bram.sv
+```
+
+Lõi tăng tốc có đúng **bốn loại module** như repo tham khảo. Các module
+top board/UART/LED là lớp giao tiếp bên ngoài. Không thêm module tính ma trận
+khác hoặc sửa nội dung bốn file gốc. QSF khai báo cả chín nguồn bằng
+`SYSTEMVERILOG_FILE`, theo
+[định dạng nguồn SystemVerilog của Quartus](https://www.intel.com/programmable/technical-pdfs/683283.pdf).
+Năm module giao tiếp được đổi đuôi sang `.sv`, giữ nguyên nội dung HDL,
+tên module/cổng và chức năng. Các khai báo wire/reg/always hiện có vẫn dùng
+được trong SystemVerilog.
 
 `matmul` vẫn là top-level của board. `matmul8x8_top` là khối tăng tốc nội bộ,
 không gán cổng tile 256 bit ra chân FPGA. Clock, reset ngoài, UART, DIP1/2/3,
 LED, GUI và giao thức `M m k n` / `C m n` / `ERR` / `READY` giữ nguyên.
 
-Luồng dữ liệu trong `matrix_uart.v`:
+Luồng dữ liệu trong `matrix_uart.sv`:
 
 1. Nhận đủ m×k phần tử A và k×n phần tử B. Bộ đệm dùng địa chỉ `8*row+col`.
 2. Đọc và đóng gói bốn tile A rồi bốn tile B. Mỗi tile gồm 16 số 16 bit,
@@ -694,17 +727,17 @@ Reset hoặc rời DIP3 reset control/loaded-mask của accelerator; RAM và cá
 thanh ghi payload không reset từng ô, được bảo vệ bởi FSM/valid. Lượt đầu
 ghi mới tất cả partial sum trước khi tích lũy, nên không dùng C của phép cũ.
 
-Port giữ các thuộc tính ưu tiên M9K và DSP của repo tham khảo. Bộ đệm A/B/C
+Bốn module gốc giữ các thuộc tính ưu tiên M9K và DSP của repo tham khảo. Bộ đệm A/B/C
 ở lớp UART cũng dùng cổng RAM đọc đồng bộ không reset payload để hỗ trợ
 suy diễn block RAM. **Số DSP/M9K/LE thực tế, khả năng fit EP4CE6E22C8 và
 timing 50 MHz chưa được xác nhận**; cần xem báo cáo Quartus sau biên dịch.
 Không suy ra mức tăng tốc đã đo từ số core: đóng gói tile và UART 9600 baud
 vẫn tốn thời gian; tốc độ truyền có thể chiếm phần lớn tổng thời gian.
 
-`matrix_uart.v` có self-check chỉ dành cho mô phỏng trong
+`matrix_uart.sv` có self-check chỉ dành cho mô phỏng trong
 `synthesis translate_off`: kiểm tra địa chỉ kết quả 0…63 và đủ 64 phần tử
 trước done. Không đưa thêm testbench vào project. Chưa chạy mô phỏng cho
-bản port; kết quả trong `test-results-16bit.txt` của repo tham khảo không
+bản tích hợp UART; kết quả trong `test-results-16bit.txt` của repo tham khảo không
 phải kết quả kiểm thử của project này.
 
 **Bản port này thay HDL:** mở lại `matmul.qpf`, biên dịch toàn project,
@@ -822,15 +855,15 @@ bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
 
 | File | Chức năng |
 |---|---|
-| `rtl/matmul.v` | Top-level, đồng bộ ba DIP, chống dội, chọn mode và ghép UART |
-| `rtl/uart_tx.v` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
-| `rtl/uart_rx.v` | RX theo mẫu `bps_start`/`clk_bps`, đồng bộ đầu vào, xác nhận start và stop |
-| `rtl/sevenseg_scan.v` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
-| `rtl/matrix_uart.v` | Parser UART, đóng gói/đệm 0 tile, điều khiển accelerator và xuất C m×n |
-| `rtl/matmul8x8_top.v` | Input tile RAM A/B, loaded-mask, giao diện start/result |
-| `rtl/matmul8x8_dataflow.v` | Engine hai lượt, mạng 2×2 core, done-mask và xuất C theo hàng |
-| `rtl/tile_c4x4_1dsp.v` | Core tile 4×4, phép nhân có dấu, partial sum 35 bit và forwarding |
-| `rtl/tile_bram.v` | RAM lưu bốn tile 4×4, đọc đồng bộ |
+| `rtl/matmul.sv` | Top-level, đồng bộ ba DIP, chống dội, chọn mode và ghép UART |
+| `rtl/uart_tx.sv` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
+| `rtl/uart_rx.sv` | RX theo mẫu `bps_start`/`clk_bps`, đồng bộ đầu vào, xác nhận start và stop |
+| `rtl/sevenseg_scan.sv` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
+| `rtl/matrix_uart.sv` | Parser UART, đóng gói/đệm 0 tile, điều khiển accelerator và xuất C m×n |
+| `rtl/accelerator/matmul8x8_top.sv` | Module gốc: input tile RAM A/B, loaded-mask, start/result |
+| `rtl/accelerator/matmul8x8_dataflow.sv` | Module gốc: hai lượt, mạng 2×2 core, done-mask, xuất C |
+| `rtl/accelerator/tile_c4x4_1dsp.sv` | Module gốc: core tile 4×4, partial sum và forwarding |
+| `rtl/accelerator/tile_bram.sv` | Module gốc: RAM lưu bốn tile 4×4, đọc đồng bộ |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
 | `check_project.py` | Kiểm tra QSF/HDL và đối chiếu chân, I/O, User Assignment của `.pin` nếu có |
@@ -839,8 +872,8 @@ bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
 | `requirements-gui.txt` | Thư viện PyQt5 và pySerial cho ứng dụng PC |
 
 Không kèm testbench trong project. Theo yêu cầu hiện tại, không chạy Icarus
-hoặc kiểm thử local cho bản sửa này. QSF chỉ đưa chín file HDL trong `rtl/`
-vào tổng hợp.
+hoặc kiểm thử local cho bản sửa này. QSF đưa năm file SystemVerilog giao tiếp
+trong `rtl/` và bốn file SystemVerilog trong `rtl/accelerator/` vào tổng hợp.
 
 ## Tạo lại project bằng một file shell
 
@@ -1012,8 +1045,7 @@ idle 1**, không flow control. Bộ đếm dùng **5208 clock/bit**,
 tương đương 9600,614 baud, sai số khoảng **+0,0064%**. TX giữ đủ cả stop bit;
 giữa các frame liên tiếp có thêm một clock 20 ns ở idle.
 
-RX triển khai theo mẫu bộ nhận bạn cung cấp, chuyển `logic`/`always_ff`
-thành `wire`/`reg`/`always` để giữ Verilog-2001. `rx_enable` bật trong
+RX triển khai theo mẫu bộ nhận bạn cung cấp. `rx_enable` bật trong
 mode DIP2 hoặc DIP3. Hai FF đồng bộ và một FF lưu mức trước phát hiện
 cạnh xuống start; `bps_start` khởi động bộ đếm baud nội bộ.
 `clk_bps` là **clock enable**, xuất hiện ở giữa mỗi bit; mọi thanh ghi vẫn
@@ -1137,7 +1169,7 @@ Chưa xác minh kết nối và thứ tự LED/digit bằng PCB V3.0 thực tế
 Cần nối **TX=P1.7, RX=P1.34**, rồi biên dịch và nạp SOF mới.
 __MATMUL_EMBEDDED_FILE_8__
 
-cat > "$destination/rtl/matrix_uart.v" <<'__MATMUL_EMBEDDED_FILE_9__'
+cat > "$destination/rtl/matrix_uart.sv" <<'__MATMUL_EMBEDDED_FILE_9__'
 module matrix_uart (
     input  wire       clk,
     input  wire       reset_n,
@@ -2171,10 +2203,9 @@ PyQt5>=5.15,<6
 pyserial>=3.5,<4
 __MATMUL_EMBEDDED_FILE_12__
 
-cat > "$destination/rtl/matmul8x8_top.v" <<'__MATMUL_EMBEDDED_FILE_13__'
+cat > "$destination/rtl/accelerator/matmul8x8_top.sv" <<'__MATMUL_EMBEDDED_FILE_13__'
 `timescale 1ns/1ps
 `default_nettype none
-// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
 
 // Complete accelerator component, including both input tile_bram instances.
 // Wide load port is an INTERNAL FPGA interface, not a board pin assignment.
@@ -2197,15 +2228,15 @@ module matmul8x8_top #(
     output wire [5:0] result_addr,
     output wire signed [ACC_W-1:0] result_data
 );
-    reg [3:0] loaded_a, loaded_b;
+    logic [3:0] loaded_a, loaded_b;
     wire engine_ready;
     wire load_accept = load_valid && load_ready;
     wire engine_start = start && start_ready;
     assign load_ready = !rst && engine_ready;
     // A write has priority over start, including an update to an existing tile.
     assign start_ready = !rst && engine_ready && (&loaded_a) && (&loaded_b) && !load_valid;
-    always @(posedge clk) begin
-        if (rst) begin loaded_a <= 4'd0; loaded_b <= 4'd0; end
+    always_ff @(posedge clk) begin
+        if (rst) begin loaded_a <= '0; loaded_b <= '0; end
         else if (load_accept) begin
             if (!load_matrix) loaded_a[load_tile_id] <= 1'b1;
             else loaded_b[load_tile_id] <= 1'b1;
@@ -2235,10 +2266,9 @@ endmodule
 `default_nettype wire
 __MATMUL_EMBEDDED_FILE_13__
 
-cat > "$destination/rtl/matmul8x8_dataflow.v" <<'__MATMUL_EMBEDDED_FILE_14__'
+cat > "$destination/rtl/accelerator/matmul8x8_dataflow.sv" <<'__MATMUL_EMBEDDED_FILE_14__'
 `timescale 1ns/1ps
 `default_nettype none
-// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
 
 // Full 8x8 matmul, 2x2 physical cores, each core owns C[4x4] and ONE multiplier.
 // Two input memories: 4 row-major 4x4 tile words each, element [0,0] at LSB.
@@ -2252,7 +2282,7 @@ module matmul8x8_dataflow #(
     input wire clk, rst,
     input wire start,
     output wire start_ready, busy,
-    output reg done,
+    output logic done,
     output wire a_rd_en,
     output wire [1:0] a_rd_tile_id,
     input wire [16*ELEM_W-1:0] a_rd_tile_data,
@@ -2266,21 +2296,20 @@ module matmul8x8_dataflow #(
     output wire [5:0] result_addr,
     output wire signed [ACC_W-1:0] result_data
 );
-    localparam [2:0] IDLE = 3'd0, FETCH_REQ = 3'd1, FETCH_WAIT = 3'd2,
-                     INJECT = 3'd3, WAIT_DONE = 3'd4, READ_C = 3'd5, EMIT_C = 3'd6;
-    localparam integer TILE_W = 16*ELEM_W;
-    reg [2:0] state;
-    reg k_block, fetch_slot, inject_cycle;
-    reg a_seen, b_seen;
-    reg [3:0] done_mask;
-    reg [5:0] out_index;
-    reg [16*ELEM_W-1:0] a_edge [0:1];
-    reg [16*ELEM_W-1:0] b_edge [0:1];
+    typedef enum logic [2:0] {IDLE, FETCH_REQ, FETCH_WAIT, INJECT,
+                             WAIT_DONE, READ_C, EMIT_C} state_t;
+    state_t state;
+    logic k_block, fetch_slot, inject_cycle;
+    logic a_seen, b_seen;
+    logic [3:0] done_mask;
+    logic [5:0] out_index;
+    logic [16*ELEM_W-1:0] a_edge [0:1];
+    logic [16*ELEM_W-1:0] b_edge [0:1];
     wire first_chunk = !k_block;
     wire accept_start = start && start_ready;
     wire [3:0] core_start, core_ready, core_busy, core_done, core_forward_valid;
     wire [3:0] core_read_ready, core_read_valid;
-    wire [4*ACC_W-1:0] core_read_data;
+    wire signed [ACC_W-1:0] core_read_data [0:3];
 
     assign start_ready = !rst && state == IDLE;
     assign busy = !rst && state != IDLE;
@@ -2291,7 +2320,7 @@ module matmul8x8_dataflow #(
     assign result_valid = !rst && state == EMIT_C;
     assign result_addr = out_index;
     wire [1:0] output_core = {out_index[5], out_index[2]};
-    assign result_data = core_read_data[output_core*ACC_W +: ACC_W];
+    assign result_data = core_read_data[output_core];
 
     // First read in READ_C. After that, an output handshake prefetches the
     // next scalar on the same edge. No read during an output stall.
@@ -2303,13 +2332,13 @@ module matmul8x8_dataflow #(
 
     // A/B responses can arrive at different clocks; one outstanding request
     // per memory and per-response flags prevent recapturing stale payloads.
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (!rst && state == FETCH_WAIT) begin
             if (a_rd_valid && !a_seen) a_edge[fetch_slot] <= a_rd_tile_data;
             if (b_rd_valid && !b_seen) b_edge[fetch_slot] <= b_rd_tile_data;
         end
     end
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
             state <= IDLE;
             k_block <= 1'b0;
@@ -2317,8 +2346,8 @@ module matmul8x8_dataflow #(
             inject_cycle <= 1'b0;
             a_seen <= 1'b0;
             b_seen <= 1'b0;
-            done_mask <= 4'd0;
-            out_index <= 6'd0;
+            done_mask <= '0;
+            out_index <= '0;
             done <= 1'b0;
         end else begin
             done <= 1'b0;
@@ -2326,8 +2355,8 @@ module matmul8x8_dataflow #(
                 IDLE: if (accept_start) begin
                     k_block <= 1'b0;
                     fetch_slot <= 1'b0;
-                    done_mask <= 4'd0;
-                    out_index <= 6'd0;
+                    done_mask <= '0;
+                    out_index <= '0;
                     state <= FETCH_REQ;
                 end
                 FETCH_REQ: begin
@@ -2344,7 +2373,7 @@ module matmul8x8_dataflow #(
                             // their previous-wave done pulses were collected.
                             if (&core_ready) begin
                                 inject_cycle <= 1'b0;
-                                done_mask <= 4'd0;
+                                done_mask <= '0;
                                 state <= INJECT;
                             end
                         end else begin
@@ -2388,34 +2417,34 @@ module matmul8x8_dataflow #(
         end
     end
 
-    wire [6*TILE_W-1:0] a_link;
-    wire [6*TILE_W-1:0] b_link;
-    wire [5:0] a_valid;
-    wire [5:0] b_valid;
+    wire [16*ELEM_W-1:0] a_link [0:1][0:2];
+    wire [16*ELEM_W-1:0] b_link [0:2][0:1];
+    wire a_valid [0:1][0:2];
+    wire b_valid [0:2][0:1];
     genvar r,c;
     generate
         for (r=0; r<2; r=r+1) begin : G_A_EDGE
-            assign a_link[(3*r)*TILE_W +: TILE_W] = a_edge[r];
-            assign a_valid[3*r] = !rst && state == INJECT && inject_cycle == (r == 1);
+            assign a_link[r][0] = a_edge[r];
+            assign a_valid[r][0] = !rst && state == INJECT && inject_cycle == 1'(r);
         end
         for (c=0; c<2; c=c+1) begin : G_B_EDGE
-            assign b_link[c*TILE_W +: TILE_W] = b_edge[c];
-            assign b_valid[c] = !rst && state == INJECT && inject_cycle == (c == 1);
+            assign b_link[0][c] = b_edge[c];
+            assign b_valid[0][c] = !rst && state == INJECT && inject_cycle == 1'(c);
         end
         for (r=0; r<2; r=r+1) begin : G_ROW
             for (c=0; c<2; c=c+1) begin : G_COL
-                localparam [1:0] GID=2*r+c;
-                assign core_start[GID] = a_valid[3*r+c] && b_valid[2*r+c];
-                assign a_valid[3*r+c+1] = core_forward_valid[GID];
-                assign b_valid[2*(r+1)+c] = core_forward_valid[GID];
+                localparam integer GID=2*r+c;
+                assign core_start[GID] = a_valid[r][c] && b_valid[r][c];
+                assign a_valid[r][c+1] = core_forward_valid[GID];
+                assign b_valid[r+1][c] = core_forward_valid[GID];
                 tile_c4x4_1dsp #(.ELEM_W(ELEM_W), .ACC_W(ACC_W)) core (
                     .clk(clk), .rst(rst), .start(core_start[GID]), .first_chunk(first_chunk),
-                    .a_tile_data(a_link[(3*r+c)*TILE_W +: TILE_W]), .b_tile_data(b_link[(2*r+c)*TILE_W +: TILE_W]),
+                    .a_tile_data(a_link[r][c]), .b_tile_data(b_link[r][c]),
                     .start_ready(core_ready[GID]), .busy(core_busy[GID]), .done(core_done[GID]),
-                    .a_forward_data(a_link[(3*r+c+1)*TILE_W +: TILE_W]), .b_forward_data(b_link[(2*(r+1)+c)*TILE_W +: TILE_W]),
+                    .a_forward_data(a_link[r][c+1]), .b_forward_data(b_link[r+1][c]),
                     .forward_valid(core_forward_valid[GID]),
-                    .c_rd_en(want_read && next_core == GID), .c_rd_addr(next_dest),
-                    .c_rd_ready(core_read_ready[GID]), .c_rd_data(core_read_data[GID*ACC_W +: ACC_W]),
+                    .c_rd_en(want_read && next_core == 2'(GID)), .c_rd_addr(next_dest),
+                    .c_rd_ready(core_read_ready[GID]), .c_rd_data(core_read_data[GID]),
                     .c_rd_valid(core_read_valid[GID])
                 );
             end
@@ -2425,10 +2454,9 @@ endmodule
 `default_nettype wire
 __MATMUL_EMBEDDED_FILE_14__
 
-cat > "$destination/rtl/tile_c4x4_1dsp.v" <<'__MATMUL_EMBEDDED_FILE_15__'
+cat > "$destination/rtl/accelerator/tile_c4x4_1dsp.sv" <<'__MATMUL_EMBEDDED_FILE_15__'
 `timescale 1ns/1ps
 `default_nettype none
-// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
 
 // ONE C[4x4] tile, ONE multiplier. Each call performs A[4x4]*B[4x4].
 // first_chunk=1: C=A*B; first_chunk=0: C=C+A*B.
@@ -2443,26 +2471,26 @@ module tile_c4x4_1dsp #(
     input wire first_chunk,
     input wire [16*ELEM_W-1:0] a_tile_data, b_tile_data,
     output wire start_ready, busy,
-    output reg done,
+    output logic done,
 
     // Accepted input tiles forwarded from the SAME registers used locally.
     // One-cycle valid pulse; payload remains held until the next start.
     output wire [16*ELEM_W-1:0] a_forward_data, b_forward_data,
-    output reg forward_valid,
+    output logic forward_valid,
 
     // Read one C element while idle. Address = 4*row+column.
     input wire c_rd_en,
     input wire [3:0] c_rd_addr,
     output wire c_rd_ready,
     output wire signed [ACC_W-1:0] c_rd_data,
-    output reg c_rd_valid
+    output logic c_rd_valid
 );
     localparam integer PROD_W = 2*ELEM_W;
-    localparam [1:0] IDLE = 2'd0, ISSUE = 2'd1, DRAIN = 2'd2;
-    reg [1:0] state;
-    reg [16*ELEM_W-1:0] a_buf, b_buf;
-    reg [5:0] issue_index;
-    reg first_latched, initialized;
+    typedef enum logic [1:0] {IDLE, ISSUE, DRAIN} state_t;
+    state_t state;
+    logic [16*ELEM_W-1:0] a_buf, b_buf;
+    logic [5:0] issue_index;
+    logic first_latched, initialized;
     assign a_forward_data = a_buf;
     assign b_forward_data = b_buf;
     wire [1:0] k = issue_index[5:4];
@@ -2481,41 +2509,41 @@ module tile_c4x4_1dsp #(
     wire issue = !rst && state == ISSUE;
 
     (* multstyle = "dsp" *) wire signed [PROD_W-1:0] product_comb;
-    reg signed [PROD_W-1:0] product;
-    reg product_valid, product_first;
-    reg [3:0] product_dest;
+    logic signed [PROD_W-1:0] product;
+    logic product_valid, product_first;
+    logic [3:0] product_dest;
     wire signed [ACC_W-1:0] product_extended =
         {{(ACC_W-PROD_W){product[PROD_W-1]}}, product};
     assign product_comb = a_value * b_value;
 
     // 16 partial sums. No memory reset: the first k of first_chunk overwrites
     // every destination before any old value is used for accumulation.
-    (* ramstyle = "M9K, no_rw_check" *) reg signed [ACC_W-1:0] c_mem [0:15];
-    reg signed [ACC_W-1:0] c_q;
+    (* ramstyle = "M9K, no_rw_check" *) logic signed [ACC_W-1:0] c_mem [0:15];
+    logic signed [ACC_W-1:0] c_q;
     wire mem_rd_en = issue || accept_read;
     wire [3:0] mem_rd_addr = issue ? dest : c_rd_addr;
     wire mem_wr_en = !rst && product_valid;
     wire signed [ACC_W-1:0] c_next = product_first ? product_extended : c_q + product_extended;
     assign c_rd_data = c_q;
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (mem_rd_en) c_q <= c_mem[mem_rd_addr];
         if (mem_wr_en) c_mem[product_dest] <= c_next;
     end
     // Payload registers need no reset; valid/control signals protect them.
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (accept_start) begin a_buf <= a_tile_data; b_buf <= b_tile_data; end
         if (issue) product <= product_comb;
     end
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
             state <= IDLE;
-            issue_index <= 6'd0;
+            issue_index <= '0;
             first_latched <= 1'b0;
             initialized <= 1'b0;
             product_valid <= 1'b0;
             product_first <= 1'b0;
-            product_dest <= 4'd0;
+            product_dest <= '0;
             c_rd_valid <= 1'b0;
             done <= 1'b0;
             forward_valid <= 1'b0;
@@ -2551,46 +2579,45 @@ endmodule
 `default_nettype wire
 __MATMUL_EMBEDDED_FILE_15__
 
-cat > "$destination/rtl/tile_bram.v" <<'__MATMUL_EMBEDDED_FILE_16__'
+cat > "$destination/rtl/accelerator/tile_bram.sv" <<'__MATMUL_EMBEDDED_FILE_16__'
 `timescale 1ns/1ps
 `default_nettype none
-// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
 
 // One 8x8 matrix stored as four 4x4 tiles.
 // tile_id = 2*tile_row + tile_col; each tile is row-major, first element LSB.
 module tile_bram #(
-    parameter integer ELEM_W = 16
+    parameter int ELEM_W = 16
 ) (
-    input  wire clk,
-    input  wire rst,
+    input  logic clk,
+    input  logic rst,
 
-    input  wire wr_en,
-    input  wire [1:0] wr_tile_id,
-    input  wire [16*ELEM_W-1:0] wr_tile_data,
+    input  logic wr_en,
+    input  logic [1:0] wr_tile_id,
+    input  logic [16*ELEM_W-1:0] wr_tile_data,
 
-    input  wire rd_en,
-    input  wire [1:0] rd_tile_id,
-    output reg [16*ELEM_W-1:0] rd_tile_data,
-    output reg rd_valid
+    input  logic rd_en,
+    input  logic [1:0] rd_tile_id,
+    output logic [16*ELEM_W-1:0] rd_tile_data,
+    output logic rd_valid
 );
-    localparam integer TILE_W = 16 * ELEM_W;
+    localparam int TILE_W = 16 * ELEM_W;
 
     // Quartus attribute for Cyclone IV. A wide word can span multiple M9Ks.
     (* ramstyle = "M9K" *)
-    reg [TILE_W-1:0] mem [0:3];
+    logic [TILE_W-1:0] mem [0:3];
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (rst) rd_valid <= 1'b0;
         else     rd_valid <= rd_en;
     end
 
     // Reset suppresses accesses; it does not clear the RAM contents.
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (!rst && wr_en)
             mem[wr_tile_id] <= wr_tile_data;
     end
 
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (!rst && rd_en)
             rd_tile_data <= mem[rd_tile_id];
     end
@@ -2608,4 +2635,4 @@ printf 'Sau biên dịch, xem output_files/matmul.pin: DIG1=133, segment a=128, 
 printf 'Ví dụ 8x8 để copy/paste: %s/UART_MATRIX_EXAMPLE.md\n' "$destination"
 printf 'Ứng dụng PC: %s/matrix_gui.py (cài requirements-gui.txt; xem README).\n' "$destination"
 printf 'GUI tự đồng bộ khi kết nối; bật DIP3 trước, chờ FPGA READY rồi gửi ma trận.\n'
-printf 'Accelerator: 4 core song song, tile 4x4, Verilog-2001; cần biên dịch và nạp SOF mới.\n'
+printf 'Accelerator: 4 module SystemVerilog gốc trong rtl/accelerator; cần biên dịch và nạp SOF mới.\n'
