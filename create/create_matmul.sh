@@ -30,8 +30,8 @@ module matmul (
     output wire [7:0] seg_n
 );
     // Assert immediately; release only through the two clocked stages.
-    (* preserve *) reg reset_meta;
-    (* preserve *) reg reset_sync;
+    (* preserve *) reg reset_meta = 1'b0;
+    (* preserve *) reg reset_sync = 1'b0;
     always @(posedge clk_50mhz or negedge reset_n) begin
         if (!reset_n) begin
             reset_meta <= 1'b0;
@@ -82,11 +82,9 @@ module matmul (
             mode_rx <= 1'b1;
     end
 
-    // Small onboard LEDs are active low: PIN_87 = TX mode, PIN_86 = RX mode.
-    assign led_n[0] = reset_sync ? mode_rx : 1'b1;
-    assign led_n[1] = reset_sync ? !mode_rx : 1'b1;
-    assign led_n[2] = 1'b1; // PIN_85: unused LED stays off.
-    assign led_n[3] = 1'b1; // PIN_84: unused LED stays off.
+    // {PIN_84, PIN_85, PIN_86, PIN_87}; 0 lights a small onboard LED.
+    assign led_n = !reset_sync ? 4'b1111 :
+                   mode_rx ? 4'b1101 : 4'b1110;
 
     uart_tx u_tx (
         .clk(clk_50mhz),
@@ -102,7 +100,6 @@ module matmul (
     uart_rx u_rx (
         .clk(clk_50mhz),
         .reset_n(reset_sync),
-        .enable(mode_rx),
         .rx(uart_rx),
         .data(rx_data),
         .valid(rx_valid)
@@ -186,35 +183,37 @@ cat > "$destination/rtl/uart_rx.v" <<'__MATMUL_EMBEDDED_FILE_2__'
 module uart_rx (
     input  wire       clk,
     input  wire       reset_n,
-    input  wire       enable,
     input  wire       rx,
     output reg  [7:0] data,
     output reg        valid
 );
     localparam [12:0] BIT_LAST = 13'd5207;
     localparam [12:0] HALF_LAST = 13'd2603;
-    localparam [2:0] WAIT_IDLE = 3'd0, IDLE = 3'd1, START = 3'd2,
-                     DATA = 3'd3, STOP = 3'd4;
+    localparam [1:0] IDLE = 2'd0, START = 2'd1,
+                     DATA = 2'd2, STOP = 2'd3;
 
     (* preserve *) reg rx_meta;
     (* preserve *) reg rx_sync;
+    reg rx_previous;
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             rx_meta <= 1'b1;
             rx_sync <= 1'b1;
+            rx_previous <= 1'b1;
         end else begin
             rx_meta <= rx;
             rx_sync <= rx_meta;
+            rx_previous <= rx_sync;
         end
     end
 
-    reg [2:0] state;
+    reg [1:0] state;
     reg [12:0] bit_count;
     reg [2:0] bit_index;
     reg [7:0] shift_data;
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            state <= WAIT_IDLE;
+            state <= IDLE;
             bit_count <= 13'd0;
             bit_index <= 3'd0;
             shift_data <= 8'd0;
@@ -222,72 +221,57 @@ module uart_rx (
             valid <= 1'b0;
         end else begin
             valid <= 1'b0;
-            if (!enable) begin
-                state <= WAIT_IDLE;
-                bit_count <= 13'd0;
-                bit_index <= 3'd0;
-                shift_data <= 8'd0;
-                data <= 8'd0;
-            end else begin
-                case (state)
-                    // Require a mark after reset, mode change or framing error.
-                    WAIT_IDLE: begin
+            // Keep frame synchronization in both modes; the top filters digits.
+            case (state)
+                IDLE: begin
+                    bit_count <= 13'd0;
+                    bit_index <= 3'd0;
+                    if (rx_previous && !rx_sync)
+                        state <= START;
+                end
+                START: begin
+                    if (bit_count == HALF_LAST) begin
+                        bit_count <= 13'd0;
                         if (!rx_sync)
-                            bit_count <= 13'd0;
-                        else if (bit_count == BIT_LAST) begin
-                            bit_count <= 13'd0;
+                            state <= DATA;
+                        else
                             state <= IDLE;
-                        end else
-                            bit_count <= bit_count + 1'b1;
+                    end else begin
+                        bit_count <= bit_count + 1'b1;
                     end
-                    IDLE: begin
+                end
+                DATA: begin
+                    if (bit_count == BIT_LAST) begin
                         bit_count <= 13'd0;
-                        bit_index <= 3'd0;
-                        if (!rx_sync)
-                            state <= START;
+                        shift_data[bit_index] <= rx_sync;
+                        if (bit_index == 3'd7)
+                            state <= STOP;
+                        else
+                            bit_index <= bit_index + 1'b1;
+                    end else begin
+                        bit_count <= bit_count + 1'b1;
                     end
-                    START: begin
-                        if (bit_count == HALF_LAST) begin
-                            bit_count <= 13'd0;
-                            if (!rx_sync)
-                                state <= DATA;
-                            else
-                                state <= IDLE;
-                        end else
-                            bit_count <= bit_count + 1'b1;
-                    end
-                    DATA: begin
-                        if (bit_count == BIT_LAST) begin
-                            bit_count <= 13'd0;
-                            shift_data[bit_index] <= rx_sync;
-                            if (bit_index == 3'd7)
-                                state <= STOP;
-                            else
-                                bit_index <= bit_index + 1'b1;
-                        end else
-                            bit_count <= bit_count + 1'b1;
-                    end
-                    STOP: begin
-                        if (bit_count == BIT_LAST) begin
-                            bit_count <= 13'd0;
-                            if (rx_sync) begin
-                                data <= shift_data;
-                                valid <= 1'b1;
-                                state <= IDLE;
-                            end else
-                                state <= WAIT_IDLE;
-                        end else
-                            bit_count <= bit_count + 1'b1;
-                    end
-                    default: begin
-                        state <= WAIT_IDLE;
+                end
+                STOP: begin
+                    if (bit_count == BIT_LAST) begin
                         bit_count <= 13'd0;
-                        bit_index <= 3'd0;
-                        shift_data <= 8'd0;
-                        data <= 8'd0;
+                        state <= IDLE;
+                        if (rx_sync) begin
+                            data <= shift_data;
+                            valid <= 1'b1;
+                        end
+                    end else begin
+                        bit_count <= bit_count + 1'b1;
                     end
-                endcase
-            end
+                end
+                default: begin
+                    state <= IDLE;
+                    bit_count <= 13'd0;
+                    bit_index <= 3'd0;
+                    shift_data <= 8'd0;
+                    data <= 8'd0;
+                end
+            endcase
         end
     end
 endmodule
@@ -356,8 +340,9 @@ PROJECT_REVISION = "matmul"
 __MATMUL_EMBEDDED_FILE_4__
 
 cat > "$destination/matmul.qsf" <<'__MATMUL_EMBEDDED_FILE_5__'
-set_global_assignment -name FAMILY "Cyclone IV E"
-set_global_assignment -name DEVICE EP4CE6E22C8
+# Board pinout/device settings: ../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf
+# Used ports only; board key_n[0] is named dip1_n in this top-level.
+# Assignments are embedded so the project remains standalone.
 set_global_assignment -name TOP_LEVEL_ENTITY matmul
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.1.0
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
@@ -367,27 +352,21 @@ set_global_assignment -name VERILOG_FILE rtl/uart_tx.v
 set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
 set_global_assignment -name VERILOG_FILE rtl/sevenseg_scan.v
 set_global_assignment -name SDC_FILE matmul.sdc
+
+# Device and I/O assignments taken from the board QSF.
+set_global_assignment -name FAMILY "Cyclone IV E"
+set_global_assignment -name DEVICE EP4CE6E22C8
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
-# Keep the legacy setting used by the vendor projects at the same value.
-set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "AS INPUT TRI-STATED"
+set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
-# LED pins 86/87 are also DEV_OE/DEV_CLRn.
 set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
 set_global_assignment -name ENABLE_DEVICE_WIDE_OE OFF
-
 set_location_assignment PIN_23 -to clk_50mhz
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to clk_50mhz
 set_location_assignment PIN_25 -to reset_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to reset_n
 set_location_assignment PIN_88 -to dip1_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to dip1_n
-set_location_assignment PIN_114 -to uart_tx
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
-set_location_assignment PIN_115 -to uart_rx
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
-
-# Small LEDs: led_n[0]/PIN_87 = mode 1, led_n[1]/PIN_86 = mode 2, active low.
-# led_n[2..3] stays off.
 set_location_assignment PIN_87 -to {led_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[0]}
 set_location_assignment PIN_86 -to {led_n[1]}
@@ -396,8 +375,6 @@ set_location_assignment PIN_85 -to {led_n[2]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[2]}
 set_location_assignment PIN_84 -to {led_n[3]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {led_n[3]}
-
-# DIG1..DIG4, as in sled.qsf. Only DIG1/PIN_133 is enabled by the HDL.
 set_location_assignment PIN_133 -to {digit_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[0]}
 set_location_assignment PIN_135 -to {digit_n[1]}
@@ -406,8 +383,6 @@ set_location_assignment PIN_136 -to {digit_n[2]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[2]}
 set_location_assignment PIN_137 -to {digit_n[3]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {digit_n[3]}
-
-# seg_n[7:0] = {dp,g,f,e,d,c,b,a}.
 set_location_assignment PIN_128 -to {seg_n[0]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[0]}
 set_location_assignment PIN_121 -to {seg_n[1]}
@@ -424,6 +399,15 @@ set_location_assignment PIN_124 -to {seg_n[6]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[6]}
 set_location_assignment PIN_127 -to {seg_n[7]}
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to {seg_n[7]}
+set_location_assignment PIN_114 -to uart_tx
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_tx
+set_location_assignment PIN_115 -to uart_rx
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to uart_rx
+
+# Project input bias: released reset/DIP are high; disconnected UART RX idles high.
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to reset_n
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to dip1_n
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to uart_rx
 __MATMUL_EMBEDDED_FILE_5__
 
 cat > "$destination/matmul.sdc" <<'__MATMUL_EMBEDDED_FILE_6__'
@@ -455,6 +439,7 @@ def main():
     sources = []
     locations = {}
     standards = {}
+    pullups = set()
     for line in (root / "matmul.qsf").read_text().splitlines():
         words = shlex.split(line, comments=True)
         if not words:
@@ -478,18 +463,22 @@ def main():
             assert port not in locations, port
             locations[port] = int(words[1].removeprefix("PIN_"))
         else:
-            assert words[1:4] == ["-name", "IO_STANDARD", "3.3-V LVTTL"], line
-            assert words[4] == "-to" and len(words) == 6, line
+            assert len(words) == 6 and words[1] == "-name" and words[4] == "-to", line
             port = words[5].strip("{}")
-            assert port not in standards, port
-            standards[port] = words[3]
+            if words[2] == "IO_STANDARD":
+                assert words[3] == "3.3-V LVTTL" and port not in standards, line
+                standards[port] = words[3]
+            else:
+                assert words[2:4] == ["WEAK_PULL_UP_RESISTOR", "ON"], line
+                assert port not in pullups, port
+                pullups.add(port)
 
     assert globals_["FAMILY"] == "Cyclone IV E"
     assert globals_["DEVICE"] == "EP4CE6E22C8"
     assert globals_["TOP_LEVEL_ENTITY"] == "matmul"
     assert globals_["VERILOG_INPUT_VERSION"] == "VERILOG_2001"
     assert globals_["RESERVE_ALL_UNUSED_PINS"] == "AS INPUT TRI-STATED"
-    assert globals_["RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP"] == "AS INPUT TRI-STATED"
+    assert globals_["CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION"] == "USE AS REGULAR IO"
     assert globals_["ENABLE_DEVICE_WIDE_RESET"] == "OFF"
     assert globals_["ENABLE_DEVICE_WIDE_OE"] == "OFF"
     revision = re.search(r'PROJECT_REVISION\s*=\s*"([^"]+)"',
@@ -517,6 +506,7 @@ def main():
         expected.update({f"{bus}[{i}]": pin for i, pin in enumerate(pins)})
     assert ports == set(expected) == set(locations) == set(standards)
     assert locations == expected
+    assert pullups == {"reset_n", "dip1_n", "uart_rx"}
     assert len(set(locations.values())) == len(ports) == 21
     print("PASS: 21 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
     print("      device/revision/top match; 4 HDL files and SDC exist.")
@@ -533,6 +523,13 @@ cat > "$destination/README.md" <<'__MATMUL_EMBEDDED_FILE_8__'
 Project dùng FPGA **EP4CE6E22C8**, clock onboard **50 MHz**, Verilog-2001.
 Mở **`matmul.qpf`** bằng Quartus Prime Lite 21.1; revision và top-level đều
 là **`matmul`**. Không cần thêm file từ hai thư mục tham khảo.
+
+`matmul.qsf` lấy trực tiếp cấu hình device và các gán chân đang dùng từ
+**`../Altera-Cyclone-IV-board-V3.0/cyclone_iv_board_v3.qsf`** theo yêu cầu.
+Chỉ đổi tên cổng `key_n[0]` của file board thành `dip1_n` trong top-level.
+Các assignment được nhúng vào QSF của project; không cần file board khi
+chép project hoặc dùng `create_matmul.sh` trên máy khác. Không import các
+ngoại vi không dùng như SDRAM, LCD, VGA hay I2C.
 
 Theo ví dụ board, chỉ **DIG1/PIN_133 (`dig[0]` trong `sled.qsf`)** của cụm LED 7 đoạn
 hiển thị số; ba digit còn lại luôn tắt. LED báo mode là **LED nhỏ LED1/PIN_87
@@ -554,9 +551,9 @@ Ban đầu hiện `0`; không cần nhấn Enter để cập nhật.
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
 | `check_project.py` | Tự kiểm tra tĩnh cổng/chân, I/O, device và file nguồn |
 
-Không kèm testbench trong project theo yêu cầu hiện tại. Đã dùng kiểm tra
-mô phỏng tạm thời cho lần sửa lỗi hiển thị; QSF chỉ đưa bốn file HDL trong
-`rtl/` vào tổng hợp.
+Không kèm testbench trong project. Theo yêu cầu hiện tại, không chạy Icarus
+hoặc kiểm thử local cho bản sửa này. QSF chỉ đưa bốn file HDL trong `rtl/`
+vào tổng hợp.
 
 ## Tạo lại project bằng một file shell
 
@@ -614,9 +611,11 @@ Chưa có phép đo hoặc kiểm tra phần cứng thực tế trong lần sử
 ## Chân và cực tính
 
 Tất cả 21 chân dùng **3.3-V LVTTL**, không trùng chân. Các chân không dùng
-được đặt **AS INPUT TRI-STATED**, gồm cả khóa legacy như các QSF ví dụ vendor.
-Các chức năng DEV_OE/DEV_CLRn của chân
-86/87 bị tắt để sử dụng LED.
+được đặt **AS INPUT TRI-STATED** theo file board đã chỉ định. Các thiết lập
+NCEO, INIT_DONE, DEV_OE và DEV_CLRn lấy theo file đó; DEV_OE/DEV_CLRn tắt
+để sử dụng chân 86/87 cho LED. Project bổ sung pull-up yếu cho RESET, DIP1
+và UART RX để các đầu vào này ở mức 1 khi không có nguồn tín hiệu kéo xuống.
+Pull-up RX không cô lập được ngõ ra MAX3232.
 
 | Cổng HDL | Chức năng | Chân FPGA |
 |---|---|---|
@@ -681,9 +680,9 @@ Giá trị cần thấy ở **các chân FPGA** sau khi chống dội:
 | Mode 1, DIP1 ON | 0 | 1 | 1 | 1 | `1111`, tắt hết |
 | Mode 2, DIP1 OFF | 1 | 0 | 1 | 1 | `1110`, chỉ DIG1; `1111` trong khoảng tắt |
 
-PIN_85/PIN_84 được xuất mức 1 tường minh, không để tri-state. Mô phỏng đã
-kiểm tra chúng luôn bằng 1; chưa xác định được nguyên nhân phần cứng khiến
-bạn thấy ba LED nhỏ sáng. Nếu hiện tượng vẫn còn sau khi nạp SOF mới,
+PIN_85/PIN_84 được xuất mức 1 tường minh, không để tri-state. Chưa xác nhận
+trạng thái thực tế của phiên bản hiện tại trên phần cứng. Nếu hiện tượng
+LED sai vẫn còn sau khi nạp SOF mới,
 đối chiếu chân trong Pin Planner/Fitter report và đo mức ở PIN_84–87
 (hoặc điểm mở rộng tương ứng) trước khi đổi cực tính hay gán chân.
 
@@ -714,10 +713,13 @@ idle 1**, không flow control. Bộ đếm dùng **5208 clock/bit**,
 tương đương 9600,614 baud, sai số khoảng **+0,0064%**. TX giữ đủ cả stop bit;
 giữa các frame liên tiếp có thêm một clock 20 ns ở idle.
 
-RX xác nhận start sau nửa bit (2604 clock), lấy mẫu mỗi 5208 clock ở giữa
-tám bit dữ liệu và stop bit. Stop thấp thì bỏ frame. Sau reset, lúc bật RX
-hoặc sau lỗi stop, RX đợi mức 1 liên tục một bit trước khi nhận start mới.
-Nên để terminal/adapter idle ít nhất 1 ms sau khi LED2 sáng rồi nhập.
+RX dùng hai FF đồng bộ và một FF lưu mức trước để phát hiện cạnh xuống
+của start bit, tương tự cách phát hiện start trong ví dụ UART board.
+Xác nhận start sau nửa bit (2604 clock), lấy mẫu mỗi 5208 clock ở giữa
+tám bit dữ liệu và stop bit. Stop thấp thì bỏ frame, trở lại chờ cạnh start.
+RX luôn theo dõi khung UART ở cả hai mode; top-level chỉ cập nhật số khi
+mode 2 có hiệu lực. Không reset bộ nhận theo công tắc mode và không chờ
+thêm một bit idle khi chuyển mode.
 
 Tất cả logic dùng cạnh lên của clock 50 MHz, không tạo clock chia mới.
 Trong mode 2 chỉ bật DIG1. Mỗi khi đổi số: tắt tất cả digit, đợi **5 µs**
@@ -727,6 +729,8 @@ dấu chấm luôn tắt. Trong mode 1/reset, cả bốn digit và toàn bộ se
 
 Nhấn RESET kéo thấp gây reset bất đồng bộ. Nhả RESET qua hai FF đồng bộ
 trước khi logic hoạt động. Trong reset, TX idle, LED và hiển thị tắt.
+Hai FF nhả reset có giá trị power-up bằng 0 cho FPGA, để mạch tự khởi động
+qua chuỗi reset khi nạp xong mà không phụ thuộc việc đã nhấn nút RESET.
 Sau nhả reset, mặc định vào RX/hiện `0`; nếu DIP1 ON, sau khoảng 20 ms
 sẽ vào mode 1. Cần nhấn rồi nhả RESET sau mỗi lần nạp.
 
@@ -788,38 +792,23 @@ Local echo không thay đổi dữ liệu FPGA nhận hay số trên LED.
 7. Nhấn giữ RESET: TX idle, tất cả LED tắt; nhả RESET: hiện `0` trong RX,
    hoặc tự chuyển sang TX sau chống dội nếu DIP1 vẫn ON.
 
-## Kiểm chứng đã thực hiện và giới hạn
+## Trạng thái bản sửa hiện tại
 
-Chạy kiểm tra tĩnh bằng Python 3.9 trở lên (không cần thư viện ngoài):
+Theo yêu cầu, **không chạy Icarus, mô phỏng, biên dịch hoặc kiểm thử local**
+cho phiên bản HDL/QSF hiện tại. Không có xác nhận hoạt động trên board thật.
+Kết quả mô phỏng các bản trước không được dùng để kết luận bản sửa này đạt.
+
+`check_project.py` đã được cập nhật theo gán chân và pull-up hiện tại,
+nhưng không chạy trong lần sửa này. Nếu sau này cần kiểm tra tĩnh bằng
+Python 3.9 trở lên, có thể chạy thủ công:
 
 ```sh
 python3 check_project.py
 ```
 
-Đã chạy thành công: kiểm tra **21 chân duy nhất**, đủ mọi bit cổng top-level,
-I/O 3.3-V LVTTL cho từng chân, TX=114/RX=115, đúng family/device,
-top/revision nhất quán, bốn nguồn HDL và SDC tồn tại với đường dẫn tương đối.
-Đã đọc/đối chiếu tài liệu chân, schematic và ví dụ vendor nêu trên.
-QSF/SDC cũng đã qua kiểm tra cú pháp Tcl bằng `tclsh`, với các API Quartus
-được thay bằng hàm giả; bước này không xác minh tính hợp lệ của assignment
-trong Quartus, đối tượng timing sau tổng hợp hoặc kết quả timing.
-
-Kiểm tra tĩnh này **không phải trình biên dịch HDL**. Trong lần sửa lỗi này,
-đã tìm thấy Icarus Verilog 11.0 ngoài PATH tại `/tmp/cyclone-uart-tools/icarus/`.
-Đã chạy biên dịch/elaboration `-g2001 -Wall` cho top-level, và mô phỏng
-với clock 50 MHz, UART 9600 baud cùng chống dội 20 ms thực tế. Kết quả PASS:
-
-- Nhận nối tiếp ASCII `0`–`9` và kiểm tra mã hiển thị; giữ số với CR/LF,
-  ký tự khác, xóa với Backspace/Delete; bỏ start ngắn và frame stop thấp.
-- TX lặp `0x41` với start/data/stop 8N1; đổi mode, chống dội và reset trong RX/TX.
-- PIN_85/PIN_84 luôn ở mức tắt; LED báo mode đúng `1110`/`1101`, reset `1111`.
-- Chỉ DIG1 được bật; segment chỉ đổi khi tất cả digit tắt, khoảng tắt và
-  khoảng ổn định trước khi bật digit đều ít nhất 5 µs.
-
-Không giữ testbench tạm trong project. `quartus_sh`, `quartus_map`,
-`quartus_sta` vẫn không có trong PATH, nên **chưa mở GUI Quartus, chưa chạy
-synthesis/fitting/TimeQuest, chưa có SOF hoặc kết quả timing trên FPGA**.
-Icarus không thay thế kiểm tra timing và ánh xạ I/O của Quartus.
+Kiểm tra tĩnh không thay thế Quartus/TimeQuest hoặc việc nạp và thử trên board.
+Chưa tạo SOF cho bản sửa này. Cần biên dịch lại project và nạp SOF mới theo
+hướng dẫn ở trên; script shell chỉ tạo file nguồn và cấu hình.
 
 Chưa xác minh kết nối và thứ tự LED/digit bằng PCB V3.0 thực tế.
 Đặc biệt, phải giải quyết xung đột **U4.12 ↔ PIN_115** trước khi nối TX adapter.
