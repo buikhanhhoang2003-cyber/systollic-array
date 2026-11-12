@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tạo project UART ba mode và GUI PyQt từ nội dung nhúng; cần Bash và các lệnh coreutils.
+# Tạo UART ba mode, accelerator 4 core/tile 4x4 và GUI PyQt; cần Bash và coreutils.
 # Cách dùng: bash create_matmul.sh [thư_mục_đích]
 # Đích mặc định: ./matmul. Thư mục cha phải tồn tại; đích phải chưa tồn tại.
 set -euo pipefail
@@ -371,6 +371,10 @@ set_global_assignment -name VERILOG_FILE rtl/uart_tx.v
 set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
 set_global_assignment -name VERILOG_FILE rtl/sevenseg_scan.v
 set_global_assignment -name VERILOG_FILE rtl/matrix_uart.v
+set_global_assignment -name VERILOG_FILE rtl/matmul8x8_top.v
+set_global_assignment -name VERILOG_FILE rtl/matmul8x8_dataflow.v
+set_global_assignment -name VERILOG_FILE rtl/tile_c4x4_1dsp.v
+set_global_assignment -name VERILOG_FILE rtl/tile_bram.v
 set_global_assignment -name SDC_FILE matmul.sdc
 
 # Device and I/O assignments taken from the board QSF.
@@ -504,7 +508,7 @@ def main():
     revision = re.search(r'PROJECT_REVISION\s*=\s*"([^"]+)"',
                          (root / "matmul.qpf").read_text()).group(1)
     assert revision == "matmul" and (root / (revision + ".qsf")).is_file()
-    assert len(sources) == len(set(sources)) == 5
+    assert len(sources) == len(set(sources)) == 9
     assert all((root / path).is_file() for path in sources)
     assert set(sources) == {str(p.relative_to(root)) for p in (root / "rtl").glob("*.v")}
     assert (root / globals_["SDC_FILE"]).is_file()
@@ -529,7 +533,7 @@ def main():
     assert locations == expected
     assert len(set(locations.values())) == len(ports) == 23
     print("PASS: 23 unique pins, all top-level ports assigned with 3.3-V LVTTL;")
-    print("      device/revision/top match; 5 HDL files and SDC exist.")
+    print("      device/revision/top match; 9 HDL files and SDC exist.")
     print("Static checks only: HDL compilation, simulation and timing are not checked.")
 
     pin_report = root / globals_["PROJECT_OUTPUT_DIRECTORY"] / (revision + ".pin")
@@ -627,9 +631,9 @@ READY
 
 Không cần lệnh RUN: FPGA tự nhân sau khi nhận đủ B. Các dòng kết quả dùng
 CRLF. Kết quả dùng **35 bit có dấu**, đủ chứa tổng 8 tích của số 16 bit,
-kể cả giá trị dương 8589934592; không cắt xuống 16/32 bit. Mạch dùng lại
-một phép nhân 16×16 và bộ cộng, đổi kết quả sang ASCII bằng binary-to-BCD
-tuần tự, không dùng bộ chia.
+kể cả giá trị dương 8589934592; không cắt xuống 16/32 bit. Lõi tính dùng
+**bốn core song song, tile 4×4**, port từ `../matmul8x8_4core_tile4x4`.
+Kết quả được đổi sang ASCII bằng binary-to-BCD tuần tự, không dùng bộ chia.
 
 - Thiếu phần tử: FPGA chờ tiếp. Khi đang nhập, gửi `M` hoặc `m` để bắt đầu
   lại cả header và hai ma trận, không cần reset.
@@ -647,13 +651,73 @@ RAM chứa A/B/C không reset từng ô để giữ khả năng dùng block RAM.
 trạng thái được reset; chỉ tính khi đủ toàn bộ A/B, chỉ xuất khi đã ghi đủ C.
 Không xuất nội dung RAM cũ sau reset hoặc sau khi hủy phép nhân.
 
+## Kiến trúc tăng tốc: bốn core, tile 4×4
+
+Đã đọc `README.txt`, bốn module RTL và testbench của repo tham khảo
+`../matmul8x8_4core_tile4x4`. Project nhúng các module đã port, không phụ thuộc
+đường dẫn repo đó khi biên dịch hoặc chạy `create_matmul.sh` trên máy khác.
+Repo tham khảo được giữ nguyên. Bốn file `.sv` được chuyển sang **Verilog-2001
+`.v`**: FSM dùng localparam/reg, không dùng logic/always_ff/enum hoặc cast
+SystemVerilog; các liên kết giữa core được trải phẳng thành bus.
+
+`matmul` vẫn là top-level của board. `matmul8x8_top` là khối tăng tốc nội bộ,
+không gán cổng tile 256 bit ra chân FPGA. Clock, reset ngoài, UART, DIP1/2/3,
+LED, GUI và giao thức `M m k n` / `C m n` / `ERR` / `READY` giữ nguyên.
+
+Luồng dữ liệu trong `matrix_uart.v`:
+
+1. Nhận đủ m×k phần tử A và k×n phần tử B. Bộ đệm dùng địa chỉ `8*row+col`.
+2. Đọc và đóng gói bốn tile A rồi bốn tile B. Mỗi tile gồm 16 số 16 bit,
+   theo hàng; phần tử [0,0] nằm ở 16 bit thấp nhất. Cell ngoài kích thước
+   thực được điền **0**, không đọc dữ liệu cũ ở vùng đó.
+3. Giữ `load_valid`/payload tới khi `load_ready`, chỉ start khi `start_ready`.
+   Engine chỉ cho start sau khi loaded-mask xác nhận đủ bốn tile mỗi ma trận.
+4. Bốn core hoạt động theo mạng 2×2: A truyền sang phải, B truyền xuống dưới,
+   một hop mỗi clock. Mỗi core có một phép nhân 16×16 và RAM giữ 16 partial sum
+   35 bit. Các partial sum được cập nhật qua hai lượt:
+
+   | Core / tile C | Lượt đầu, khởi tạo C | Lượt sau, cộng vào C |
+   |---|---|---|
+   | Core00 / C00 | A00 × B00 | A01 × B10 |
+   | Core01 / C01 | A00 × B01 | A01 × B11 |
+   | Core10 / C10 | A10 × B00 | A11 × B10 |
+   | Core11 / C11 | A10 × B01 | A11 × B11 |
+
+5. Thu các xung done lệch nhau bằng done-mask trước khi chuyển lượt. Sau
+   lượt cuối, accelerator phát 64 kết quả theo hàng. Adapter lưu toàn bộ C,
+   chờ done rồi xuất **chỉ m×n** phần tử lên UART như trước.
+
+Ma trận chữ nhật và mọi kích thước 1–8 dùng cùng engine 8×8 qua zero-padding;
+không yêu cầu kích thước chia hết cho 4. Ví dụ A 2×3 nhân B 3×1 vẫn gửi
+`M 2 3 1` và nhận `C 2 1`. Phần tử mới luôn được nạp đủ trước start.
+Reset hoặc rời DIP3 reset control/loaded-mask của accelerator; RAM và các
+thanh ghi payload không reset từng ô, được bảo vệ bởi FSM/valid. Lượt đầu
+ghi mới tất cả partial sum trước khi tích lũy, nên không dùng C của phép cũ.
+
+Port giữ các thuộc tính ưu tiên M9K và DSP của repo tham khảo. Bộ đệm A/B/C
+ở lớp UART cũng dùng cổng RAM đọc đồng bộ không reset payload để hỗ trợ
+suy diễn block RAM. **Số DSP/M9K/LE thực tế, khả năng fit EP4CE6E22C8 và
+timing 50 MHz chưa được xác nhận**; cần xem báo cáo Quartus sau biên dịch.
+Không suy ra mức tăng tốc đã đo từ số core: đóng gói tile và UART 9600 baud
+vẫn tốn thời gian; tốc độ truyền có thể chiếm phần lớn tổng thời gian.
+
+`matrix_uart.v` có self-check chỉ dành cho mô phỏng trong
+`synthesis translate_off`: kiểm tra địa chỉ kết quả 0…63 và đủ 64 phần tử
+trước done. Không đưa thêm testbench vào project. Chưa chạy mô phỏng cho
+bản port; kết quả trong `test-results-16bit.txt` của repo tham khảo không
+phải kết quả kiểm thử của project này.
+
+**Bản port này thay HDL:** mở lại `matmul.qpf`, biên dịch toàn project,
+nạp `output_files/matmul.sof` mới và nhấn/nhả RESET. GUI hiện tại dùng được
+với cùng giao thức; không cần đổi file Python để dùng lõi mới.
+
 ## Ứng dụng Python / PyQt cho PC
 
 Chạy **`matrix_gui.py`** bằng Python 3.9 trở lên. Ứng dụng dùng
 [PyQt5](https://www.riverbankcomputing.com/static/Docs/PyQt5/) cho giao diện
 và [pySerial](https://pyserial.readthedocs.io/en/latest/pyserial_api.html)
 cho UART. Không cần NumPy; phép nhân Python dùng số nguyên không cắt xuống 32 bit.
-HDL và giao thức UART giữ nguyên.
+Ứng dụng PC dùng cùng giao thức UART với lõi bốn core.
 
 Cài thư viện rồi mở ứng dụng trên Linux:
 
@@ -698,7 +762,7 @@ không hợp lệ nên FPGA trả `ERR` rồi `READY`; cặp phản hồi này x
 và đưa parser FPGA về trạng thái chờ lệnh mới. **ERR ở riêng bước đồng bộ
 là phản hồi dự kiến**, không phải lỗi phép nhân. Thao tác đồng bộ hủy dữ liệu
 ma trận nhập dở trên board; không cho đồng bộ khi ứng dụng đang chờ phép nhân.
-Không cần sửa HDL hoặc biên dịch lại SOF chỉ để áp dụng sửa lỗi GUI này.
+Lệnh đồng bộ này vẫn được parser UART hỗ trợ khi dùng accelerator mới.
 
 Nếu sau 5 giây không nhận đủ cặp phản hồi, ứng dụng báo lỗi đồng bộ và cho
 thử lại. Nhật ký chỉ có dòng Kết nối/TX mà không có RX: kiểm tra board đang
@@ -762,7 +826,11 @@ bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
 | `rtl/uart_tx.v` | Phát UART 8N1, lặp byte `0x41` khi được cho phép |
 | `rtl/uart_rx.v` | RX theo mẫu `bps_start`/`clk_bps`, đồng bộ đầu vào, xác nhận start và stop |
 | `rtl/sevenseg_scan.v` | Giải mã một chữ số trên DIG1, tắt digit trước khi đổi segment |
-| `rtl/matrix_uart.v` | Parser ma trận, nhân số có dấu, định dạng kết quả ASCII và bắt tay TX |
+| `rtl/matrix_uart.v` | Parser UART, đóng gói/đệm 0 tile, điều khiển accelerator và xuất C m×n |
+| `rtl/matmul8x8_top.v` | Input tile RAM A/B, loaded-mask, giao diện start/result |
+| `rtl/matmul8x8_dataflow.v` | Engine hai lượt, mạng 2×2 core, done-mask và xuất C theo hàng |
+| `rtl/tile_c4x4_1dsp.v` | Core tile 4×4, phép nhân có dấu, partial sum 35 bit và forwarding |
+| `rtl/tile_bram.v` | RAM lưu bốn tile 4×4, đọc đồng bộ |
 | `matmul.qpf`, `matmul.qsf` | Project, revision, device, nguồn và gán chân |
 | `matmul.sdc` | Clock và ngoại lệ timing tại biên bất đồng bộ |
 | `check_project.py` | Kiểm tra QSF/HDL và đối chiếu chân, I/O, User Assignment của `.pin` nếu có |
@@ -771,12 +839,12 @@ bản biên dịch đó, không phải phép đo điện áp nguồn trên PCB.
 | `requirements-gui.txt` | Thư viện PyQt5 và pySerial cho ứng dụng PC |
 
 Không kèm testbench trong project. Theo yêu cầu hiện tại, không chạy Icarus
-hoặc kiểm thử local cho bản sửa này. QSF chỉ đưa năm file HDL trong `rtl/`
+hoặc kiểm thử local cho bản sửa này. QSF chỉ đưa chín file HDL trong `rtl/`
 vào tổng hợp.
 
 ## Tạo lại project bằng một file shell
 
-File `create_matmul.sh` chứa sẵn nội dung của mười ba file project trong bản
+File `create_matmul.sh` chứa sẵn nội dung của mười bảy file project trong bản
 hiện tại, không cần mạng hoặc thư mục tham khảo để tạo file. Chạy bằng Bash:
 
 ```sh
@@ -1061,7 +1129,7 @@ python3 check_project.py
 ```
 
 Kiểm tra tĩnh không thay thế Quartus/TimeQuest hoặc việc nạp và thử trên board.
-Chưa xác nhận tài nguyên và timing của lõi nhân ma trận trên EP4CE6.
+Chưa xác nhận tài nguyên và timing của lõi bốn core/tile 4×4 trên EP4CE6.
 Chưa tạo SOF cho bản sửa này. Cần biên dịch lại project và nạp SOF mới theo
 hướng dẫn ở trên; script shell chỉ tạo file nguồn và cấu hình.
 
@@ -1083,10 +1151,11 @@ module matrix_uart (
     localparam [4:0] MESSAGE = 5'd0, WAIT_M = 5'd1,
                      DIM_M = 5'd2, DIM_K = 5'd3, DIM_N = 5'd4,
                      LOAD_A = 5'd5, LOAD_B = 5'd6,
-                     FETCH = 5'd7, MULTIPLY = 5'd8, ACCUMULATE = 5'd9,
+                     TILE_READ = 5'd7, TILE_PACK = 5'd8, TILE_LOAD = 5'd9,
                      HEADER = 5'd10, READ_RESULT = 5'd11, CONVERT_START = 5'd12,
                      CONVERT = 5'd13, SIGN = 5'd14, DIGITS = 5'd15,
-                     SEPARATOR = 5'd16, LINE_FEED = 5'd17;
+                     SEPARATOR = 5'd16, LINE_FEED = 5'd17,
+                     CORE_START = 5'd18, CORE_WAIT = 5'd19;
     localparam [55:0] READY_TEXT = "READY\r\n";
     localparam [95:0] ERROR_TEXT = "ERR\r\nREADY\r\n";
 
@@ -1095,24 +1164,28 @@ module matrix_uart (
     reg [3:0] message_pos;
     reg [2:0] header_pos;
     reg [3:0] rows_m, inner_k, cols_n;
-    reg [5:0] write_addr;
     reg [2:0] input_row, input_col;
     reg [15:0] magnitude;
     reg negative, token_active, token_digits;
 
     // Contents become valid only after all required elements have been written.
-    reg signed [15:0] matrix_a [0:63];
-    reg signed [15:0] matrix_b [0:63];
-    reg signed [34:0] matrix_c [0:63];
-    reg [2:0] row_index, col_index, inner_index;
-    reg [5:0] a_row_base, a_addr, b_addr, c_addr;
-    reg signed [15:0] a_operand, b_operand;
-    reg signed [31:0] product;
-    reg signed [34:0] accumulator;
-    wire signed [34:0] extended_product = {{3{product[31]}}, product};
-    wire signed [34:0] sum = accumulator + extended_product;
+    (* ramstyle = "M9K" *) reg signed [15:0] matrix_a [0:63];
+    (* ramstyle = "M9K" *) reg signed [15:0] matrix_b [0:63];
+    (* ramstyle = "M9K" *) reg signed [34:0] matrix_c [0:63];
+    reg load_matrix;
+    reg [1:0] load_tile;
+    reg [3:0] pack_element;
+    reg [255:0] tile_data;
+    reg [15:0] a_pack_q, b_pack_q;
+    wire [2:0] pack_row = {load_tile[1], pack_element[3:2]};
+    wire [2:0] pack_col = {load_tile[0], pack_element[1:0]};
+    wire [5:0] pack_addr = {pack_row, pack_col};
+    wire pack_in_range = load_matrix ? (pack_row < inner_k && pack_col < cols_n) :
+                                      (pack_row < rows_m && pack_col < inner_k);
+    wire core_load_ready, core_start_ready, core_done, core_result_valid;
+    wire [5:0] core_result_addr;
+    wire signed [34:0] core_result_data;
 
-    reg [5:0] result_addr;
     reg [2:0] result_row, result_col;
     reg signed [34:0] result_value;
     reg result_negative;
@@ -1131,6 +1204,36 @@ module matrix_uart (
     wire input_state = (state >= DIM_M && state <= LOAD_B);
     wire [3:0] rx_digit = rx_data[3:0];
     wire [15:0] token_value = negative ? (~magnitude + 16'd1) : magnitude;
+    wire accept_token = reset_n && enable && rx_valid && is_space && token_active && token_digits;
+
+    // Unreset synchronous RAM ports; FSM/valid signals protect every payload read.
+    always @(posedge clk) begin
+        if (accept_token && state == LOAD_A)
+            matrix_a[{input_row, input_col}] <= token_value;
+        if (accept_token && state == LOAD_B)
+            matrix_b[{input_row, input_col}] <= token_value;
+        if (reset_n && enable && state == TILE_READ && pack_in_range) begin
+            if (load_matrix)
+                b_pack_q <= matrix_b[pack_addr];
+            else
+                a_pack_q <= matrix_a[pack_addr];
+        end
+        if (reset_n && enable && state == CORE_WAIT && core_result_valid)
+            matrix_c[core_result_addr] <= core_result_data;
+        if (reset_n && enable && state == READ_RESULT)
+            result_value <= matrix_c[{result_row, result_col}];
+    end
+
+    // Hold the accelerator reset until a complete new A/B pair is available.
+    wire core_reset = !reset_n || !enable || input_state || state == MESSAGE || state == WAIT_M;
+    matmul8x8_top #(.ELEM_W(16), .ACC_W(35)) u_accelerator (
+        .clk(clk), .rst(core_reset),
+        .load_valid(state == TILE_LOAD), .load_ready(core_load_ready),
+        .load_matrix(load_matrix), .load_tile_id(load_tile), .load_tile_data(tile_data),
+        .start(state == CORE_START), .start_ready(core_start_ready), .busy(), .done(core_done),
+        .result_valid(core_result_valid), .result_ready(state == CORE_WAIT),
+        .result_addr(core_result_addr), .result_data(core_result_data)
+    );
 
     // Binary-to-BCD conversion takes 35 clock enables, without a divider.
     always @* begin
@@ -1198,28 +1301,18 @@ module matrix_uart (
             rows_m <= 4'd0;
             inner_k <= 4'd0;
             cols_n <= 4'd0;
-            write_addr <= 6'd0;
             input_row <= 3'd0;
             input_col <= 3'd0;
             magnitude <= 16'd0;
             negative <= 1'b0;
             token_active <= 1'b0;
             token_digits <= 1'b0;
-            row_index <= 3'd0;
-            col_index <= 3'd0;
-            inner_index <= 3'd0;
-            a_row_base <= 6'd0;
-            a_addr <= 6'd0;
-            b_addr <= 6'd0;
-            c_addr <= 6'd0;
-            a_operand <= 16'sd0;
-            b_operand <= 16'sd0;
-            product <= 32'sd0;
-            accumulator <= 35'sd0;
-            result_addr <= 6'd0;
+            load_matrix <= 1'b0;
+            load_tile <= 2'd0;
+            pack_element <= 4'd0;
+            tile_data <= 256'd0;
             result_row <= 3'd0;
             result_col <= 3'd0;
-            result_value <= 35'sd0;
             result_negative <= 1'b0;
             binary_shift <= 35'd0;
             bcd <= 44'd0;
@@ -1235,7 +1328,6 @@ module matrix_uart (
             rows_m <= 4'd0;
             inner_k <= 4'd0;
             cols_n <= 4'd0;
-            write_addr <= 6'd0;
             input_row <= 3'd0;
             input_col <= 3'd0;
             magnitude <= 16'd0;
@@ -1302,14 +1394,11 @@ module matrix_uart (
                                             state <= LOAD_A;
                                         end
                                         LOAD_A: begin
-                                            matrix_a[write_addr] <= token_value;
-                                            write_addr <= write_addr + 1'b1;
                                             if (input_col == inner_k - 1'b1) begin
                                                 input_col <= 3'd0;
                                                 if (input_row == rows_m - 1'b1) begin
                                                     state <= LOAD_B;
                                                     input_row <= 3'd0;
-                                                    write_addr <= 6'd0;
                                                 end else begin
                                                     input_row <= input_row + 1'b1;
                                                 end
@@ -1318,20 +1407,13 @@ module matrix_uart (
                                             end
                                         end
                                         LOAD_B: begin
-                                            matrix_b[write_addr] <= token_value;
-                                            write_addr <= write_addr + 1'b1;
                                             if (input_col == cols_n - 1'b1) begin
                                                 input_col <= 3'd0;
                                                 if (input_row == inner_k - 1'b1) begin
-                                                    row_index <= 3'd0;
-                                                    col_index <= 3'd0;
-                                                    inner_index <= 3'd0;
-                                                    a_row_base <= 6'd0;
-                                                    a_addr <= 6'd0;
-                                                    b_addr <= 6'd0;
-                                                    c_addr <= 6'd0;
-                                                    accumulator <= 35'sd0;
-                                                    state <= FETCH;
+                                                    load_matrix <= 1'b0;
+                                                    load_tile <= 2'd0;
+                                                    pack_element <= 4'd0;
+                                                    state <= TILE_READ;
                                                 end else begin
                                                     input_row <= input_row + 1'b1;
                                                 end
@@ -1350,52 +1432,48 @@ module matrix_uart (
                         end
                     end
                 end
-                FETCH: begin
-                    a_operand <= matrix_a[a_addr];
-                    b_operand <= matrix_b[b_addr];
-                    state <= MULTIPLY;
+                TILE_READ: begin
+                    state <= TILE_PACK;
                 end
-                MULTIPLY: begin
-                    product <= a_operand * b_operand;
-                    state <= ACCUMULATE;
+                TILE_PACK: begin
+                    // Out-of-range cells are zero, never stale RAM from the previous request.
+                    tile_data[pack_element*16 +: 16] <= !pack_in_range ? 16'd0 :
+                                                       load_matrix ? b_pack_q : a_pack_q;
+                    if (pack_element == 4'd15)
+                        state <= TILE_LOAD;
+                    else begin
+                        pack_element <= pack_element + 1'b1;
+                        state <= TILE_READ;
+                    end
                 end
-                ACCUMULATE: begin
-                    if (inner_index == inner_k - 1'b1) begin
-                        matrix_c[c_addr] <= sum;
-                        accumulator <= 35'sd0;
-                        inner_index <= 3'd0;
-                        if (col_index == cols_n - 1'b1) begin
-                            col_index <= 3'd0;
-                            if (row_index == rows_m - 1'b1) begin
-                                header_pos <= 3'd0;
-                                state <= HEADER;
-                            end else begin
-                                row_index <= row_index + 1'b1;
-                                a_row_base <= a_row_base + inner_k;
-                                a_addr <= a_row_base + inner_k;
-                                b_addr <= 6'd0;
-                                c_addr <= c_addr + 1'b1;
-                                state <= FETCH;
-                            end
+                TILE_LOAD: begin
+                    if (core_load_ready) begin
+                        pack_element <= 4'd0;
+                        if (load_tile != 2'd3) begin
+                            load_tile <= load_tile + 1'b1;
+                            state <= TILE_READ;
+                        end else if (!load_matrix) begin
+                            load_matrix <= 1'b1;
+                            load_tile <= 2'd0;
+                            state <= TILE_READ;
                         end else begin
-                            col_index <= col_index + 1'b1;
-                            a_addr <= a_row_base;
-                            b_addr <= {3'd0, col_index} + 6'd1;
-                            c_addr <= c_addr + 1'b1;
-                            state <= FETCH;
+                            state <= CORE_START;
                         end
-                    end else begin
-                        accumulator <= sum;
-                        inner_index <= inner_index + 1'b1;
-                        a_addr <= a_addr + 1'b1;
-                        b_addr <= b_addr + cols_n;
-                        state <= FETCH;
+                    end
+                end
+                CORE_START: begin
+                    if (core_start_ready)
+                        state <= CORE_WAIT;
+                end
+                CORE_WAIT: begin
+                    if (core_done) begin
+                        header_pos <= 3'd0;
+                        state <= HEADER;
                     end
                 end
                 HEADER: begin
                     if (tx_ready) begin
                         if (header_pos == 3'd6) begin
-                            result_addr <= 6'd0;
                             result_row <= 3'd0;
                             result_col <= 3'd0;
                             state <= READ_RESULT;
@@ -1405,7 +1483,6 @@ module matrix_uart (
                     end
                 end
                 READ_RESULT: begin
-                    result_value <= matrix_c[result_addr];
                     state <= CONVERT_START;
                 end
                 CONVERT_START: begin
@@ -1448,7 +1525,6 @@ module matrix_uart (
                             state <= LINE_FEED;
                         end else begin
                             result_col <= result_col + 1'b1;
-                            result_addr <= result_addr + 1'b1;
                             state <= READ_RESULT;
                         end
                     end
@@ -1462,7 +1538,6 @@ module matrix_uart (
                         end else begin
                             result_row <= result_row + 1'b1;
                             result_col <= 3'd0;
-                            result_addr <= result_addr + 1'b1;
                             state <= READ_RESULT;
                         end
                     end
@@ -1475,6 +1550,29 @@ module matrix_uart (
             endcase
         end
     end
+
+    // synthesis translate_off
+    reg [6:0] checked_results;
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n)
+            checked_results <= 7'd0;
+        else if (core_reset || state == CORE_START)
+            checked_results <= 7'd0;
+        else if (state == CORE_WAIT) begin
+            if (core_result_valid) begin
+                if (checked_results >= 7'd64 || core_result_addr !== checked_results[5:0]) begin
+                    $display("ERROR: accelerator result sequence is not 0..63");
+                    $stop;
+                end
+                checked_results <= checked_results + 1'b1;
+            end
+            if (core_done && checked_results !== 7'd64) begin
+                $display("ERROR: accelerator done before all 64 C values were stored");
+                $stop;
+            end
+        end
+    end
+    // synthesis translate_on
 endmodule
 __MATMUL_EMBEDDED_FILE_9__
 
@@ -2073,7 +2171,435 @@ PyQt5>=5.15,<6
 pyserial>=3.5,<4
 __MATMUL_EMBEDDED_FILE_12__
 
-printf 'Đã tạo 13 file project tại: %s\n' "$destination"
+cat > "$destination/rtl/matmul8x8_top.v" <<'__MATMUL_EMBEDDED_FILE_13__'
+`timescale 1ns/1ps
+`default_nettype none
+// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
+
+// Complete accelerator component, including both input tile_bram instances.
+// Wide load port is an INTERNAL FPGA interface, not a board pin assignment.
+// Load four A and four B 4x4 tiles before start. Tile ID=2*tile_row+tile_col.
+// One start computes all 64 signed C values, streamed in row-major order.
+module matmul8x8_top #(
+    parameter integer ELEM_W = 16,
+    parameter integer ACC_W = 2*ELEM_W+3
+) (
+    input wire clk, rst,
+    input wire load_valid,
+    output wire load_ready,
+    input wire load_matrix, // 0=A, 1=B
+    input wire [1:0] load_tile_id,
+    input wire [16*ELEM_W-1:0] load_tile_data,
+    input wire start,
+    output wire start_ready, busy, done,
+    output wire result_valid,
+    input wire result_ready,
+    output wire [5:0] result_addr,
+    output wire signed [ACC_W-1:0] result_data
+);
+    reg [3:0] loaded_a, loaded_b;
+    wire engine_ready;
+    wire load_accept = load_valid && load_ready;
+    wire engine_start = start && start_ready;
+    assign load_ready = !rst && engine_ready;
+    // A write has priority over start, including an update to an existing tile.
+    assign start_ready = !rst && engine_ready && (&loaded_a) && (&loaded_b) && !load_valid;
+    always @(posedge clk) begin
+        if (rst) begin loaded_a <= 4'd0; loaded_b <= 4'd0; end
+        else if (load_accept) begin
+            if (!load_matrix) loaded_a[load_tile_id] <= 1'b1;
+            else loaded_b[load_tile_id] <= 1'b1;
+        end
+    end
+
+    wire a_rd_en, b_rd_en, a_rd_valid, b_rd_valid;
+    wire [1:0] a_rd_tile_id, b_rd_tile_id;
+    wire [16*ELEM_W-1:0] a_rd_tile_data, b_rd_tile_data;
+    tile_bram #(.ELEM_W(ELEM_W)) u_a_bram (
+        .clk(clk), .rst(rst), .wr_en(load_accept && !load_matrix),
+        .wr_tile_id(load_tile_id), .wr_tile_data(load_tile_data),
+        .rd_en(a_rd_en), .rd_tile_id(a_rd_tile_id), .rd_tile_data(a_rd_tile_data), .rd_valid(a_rd_valid)
+    );
+    tile_bram #(.ELEM_W(ELEM_W)) u_b_bram (
+        .clk(clk), .rst(rst), .wr_en(load_accept && load_matrix),
+        .wr_tile_id(load_tile_id), .wr_tile_data(load_tile_data),
+        .rd_en(b_rd_en), .rd_tile_id(b_rd_tile_id), .rd_tile_data(b_rd_tile_data), .rd_valid(b_rd_valid)
+    );
+    matmul8x8_dataflow #(.ELEM_W(ELEM_W), .ACC_W(ACC_W)) u_dataflow (
+        .clk(clk), .rst(rst), .start(engine_start), .start_ready(engine_ready), .busy(busy), .done(done),
+        .a_rd_en(a_rd_en), .a_rd_tile_id(a_rd_tile_id), .a_rd_tile_data(a_rd_tile_data), .a_rd_valid(a_rd_valid),
+        .b_rd_en(b_rd_en), .b_rd_tile_id(b_rd_tile_id), .b_rd_tile_data(b_rd_tile_data), .b_rd_valid(b_rd_valid),
+        .result_valid(result_valid), .result_ready(result_ready), .result_addr(result_addr), .result_data(result_data)
+    );
+endmodule
+`default_nettype wire
+__MATMUL_EMBEDDED_FILE_13__
+
+cat > "$destination/rtl/matmul8x8_dataflow.v" <<'__MATMUL_EMBEDDED_FILE_14__'
+`timescale 1ns/1ps
+`default_nettype none
+// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
+
+// Full 8x8 matmul, 2x2 physical cores, each core owns C[4x4] and ONE multiplier.
+// Two input memories: 4 row-major 4x4 tile words each, element [0,0] at LSB.
+// Two waves: C(R,S) = A(R,0)*B(0,S) + A(R,1)*B(1,S).
+// Registered tile forwarding: A moves right, B moves down, one hop/clock.
+// Wait for every done pulse before injecting the next wave.
+module matmul8x8_dataflow #(
+    parameter integer ELEM_W = 16,
+    parameter integer ACC_W = 2*ELEM_W+3
+) (
+    input wire clk, rst,
+    input wire start,
+    output wire start_ready, busy,
+    output reg done,
+    output wire a_rd_en,
+    output wire [1:0] a_rd_tile_id,
+    input wire [16*ELEM_W-1:0] a_rd_tile_data,
+    input wire a_rd_valid,
+    output wire b_rd_en,
+    output wire [1:0] b_rd_tile_id,
+    input wire [16*ELEM_W-1:0] b_rd_tile_data,
+    input wire b_rd_valid,
+    output wire result_valid,
+    input wire result_ready,
+    output wire [5:0] result_addr,
+    output wire signed [ACC_W-1:0] result_data
+);
+    localparam [2:0] IDLE = 3'd0, FETCH_REQ = 3'd1, FETCH_WAIT = 3'd2,
+                     INJECT = 3'd3, WAIT_DONE = 3'd4, READ_C = 3'd5, EMIT_C = 3'd6;
+    localparam integer TILE_W = 16*ELEM_W;
+    reg [2:0] state;
+    reg k_block, fetch_slot, inject_cycle;
+    reg a_seen, b_seen;
+    reg [3:0] done_mask;
+    reg [5:0] out_index;
+    reg [16*ELEM_W-1:0] a_edge [0:1];
+    reg [16*ELEM_W-1:0] b_edge [0:1];
+    wire first_chunk = !k_block;
+    wire accept_start = start && start_ready;
+    wire [3:0] core_start, core_ready, core_busy, core_done, core_forward_valid;
+    wire [3:0] core_read_ready, core_read_valid;
+    wire [4*ACC_W-1:0] core_read_data;
+
+    assign start_ready = !rst && state == IDLE;
+    assign busy = !rst && state != IDLE;
+    assign a_rd_en = !rst && state == FETCH_REQ;
+    assign b_rd_en = !rst && state == FETCH_REQ;
+    assign a_rd_tile_id = {fetch_slot, k_block};
+    assign b_rd_tile_id = {k_block, fetch_slot};
+    assign result_valid = !rst && state == EMIT_C;
+    assign result_addr = out_index;
+    wire [1:0] output_core = {out_index[5], out_index[2]};
+    assign result_data = core_read_data[output_core*ACC_W +: ACC_W];
+
+    // First read in READ_C. After that, an output handshake prefetches the
+    // next scalar on the same edge. No read during an output stall.
+    wire want_read = !rst && ((state == READ_C) ||
+                         (state == EMIT_C && result_ready && out_index != 6'd63));
+    wire [5:0] next_index = state == EMIT_C ? out_index + 6'd1 : out_index;
+    wire [1:0] next_core = {next_index[5], next_index[2]};
+    wire [3:0] next_dest = {next_index[4:3], next_index[1:0]};
+
+    // A/B responses can arrive at different clocks; one outstanding request
+    // per memory and per-response flags prevent recapturing stale payloads.
+    always @(posedge clk) begin
+        if (!rst && state == FETCH_WAIT) begin
+            if (a_rd_valid && !a_seen) a_edge[fetch_slot] <= a_rd_tile_data;
+            if (b_rd_valid && !b_seen) b_edge[fetch_slot] <= b_rd_tile_data;
+        end
+    end
+    always @(posedge clk) begin
+        if (rst) begin
+            state <= IDLE;
+            k_block <= 1'b0;
+            fetch_slot <= 1'b0;
+            inject_cycle <= 1'b0;
+            a_seen <= 1'b0;
+            b_seen <= 1'b0;
+            done_mask <= 4'd0;
+            out_index <= 6'd0;
+            done <= 1'b0;
+        end else begin
+            done <= 1'b0;
+            case (state)
+                IDLE: if (accept_start) begin
+                    k_block <= 1'b0;
+                    fetch_slot <= 1'b0;
+                    done_mask <= 4'd0;
+                    out_index <= 6'd0;
+                    state <= FETCH_REQ;
+                end
+                FETCH_REQ: begin
+                    a_seen <= 1'b0;
+                    b_seen <= 1'b0;
+                    state <= FETCH_WAIT;
+                end
+                FETCH_WAIT: begin
+                    if (a_rd_valid) a_seen <= 1'b1;
+                    if (b_rd_valid) b_seen <= 1'b1;
+                    if ((a_seen || a_rd_valid) && (b_seen || b_rd_valid)) begin
+                        if (fetch_slot) begin
+                            // All cores are idle here: initially, or after
+                            // their previous-wave done pulses were collected.
+                            if (&core_ready) begin
+                                inject_cycle <= 1'b0;
+                                done_mask <= 4'd0;
+                                state <= INJECT;
+                            end
+                        end else begin
+                            fetch_slot <= 1'b1;
+                            state <= FETCH_REQ;
+                        end
+                    end
+                end
+                INJECT: begin
+                    // Row 0 / column 0 at cycle 0, row 1 / column 1 at 1.
+                    // Node starts occur at offsets [0,1;1,2].
+                    if (inject_cycle) state <= WAIT_DONE;
+                    else inject_cycle <= 1'b1;
+                end
+                WAIT_DONE: begin
+                    done_mask <= done_mask | core_done;
+                    if (&(done_mask | core_done)) begin
+                        if (!k_block) begin
+                            k_block <= 1'b1;
+                            fetch_slot <= 1'b0;
+                            state <= FETCH_REQ;
+                        end else begin
+                            out_index <= 6'd0;
+                            state <= READ_C;
+                        end
+                    end
+                end
+                READ_C: if (core_read_ready[next_core]) state <= EMIT_C;
+                EMIT_C: if (result_ready) begin
+                    if (out_index == 6'd63) begin
+                        done <= 1'b1;
+                        state <= IDLE;
+                    end else begin
+                        out_index <= out_index + 6'd1;
+                        // Normally ready is always high after WAIT_DONE.
+                        if (!core_read_ready[next_core]) state <= READ_C;
+                    end
+                end
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+    wire [6*TILE_W-1:0] a_link;
+    wire [6*TILE_W-1:0] b_link;
+    wire [5:0] a_valid;
+    wire [5:0] b_valid;
+    genvar r,c;
+    generate
+        for (r=0; r<2; r=r+1) begin : G_A_EDGE
+            assign a_link[(3*r)*TILE_W +: TILE_W] = a_edge[r];
+            assign a_valid[3*r] = !rst && state == INJECT && inject_cycle == (r == 1);
+        end
+        for (c=0; c<2; c=c+1) begin : G_B_EDGE
+            assign b_link[c*TILE_W +: TILE_W] = b_edge[c];
+            assign b_valid[c] = !rst && state == INJECT && inject_cycle == (c == 1);
+        end
+        for (r=0; r<2; r=r+1) begin : G_ROW
+            for (c=0; c<2; c=c+1) begin : G_COL
+                localparam [1:0] GID=2*r+c;
+                assign core_start[GID] = a_valid[3*r+c] && b_valid[2*r+c];
+                assign a_valid[3*r+c+1] = core_forward_valid[GID];
+                assign b_valid[2*(r+1)+c] = core_forward_valid[GID];
+                tile_c4x4_1dsp #(.ELEM_W(ELEM_W), .ACC_W(ACC_W)) core (
+                    .clk(clk), .rst(rst), .start(core_start[GID]), .first_chunk(first_chunk),
+                    .a_tile_data(a_link[(3*r+c)*TILE_W +: TILE_W]), .b_tile_data(b_link[(2*r+c)*TILE_W +: TILE_W]),
+                    .start_ready(core_ready[GID]), .busy(core_busy[GID]), .done(core_done[GID]),
+                    .a_forward_data(a_link[(3*r+c+1)*TILE_W +: TILE_W]), .b_forward_data(b_link[(2*(r+1)+c)*TILE_W +: TILE_W]),
+                    .forward_valid(core_forward_valid[GID]),
+                    .c_rd_en(want_read && next_core == GID), .c_rd_addr(next_dest),
+                    .c_rd_ready(core_read_ready[GID]), .c_rd_data(core_read_data[GID*ACC_W +: ACC_W]),
+                    .c_rd_valid(core_read_valid[GID])
+                );
+            end
+        end
+    endgenerate
+endmodule
+`default_nettype wire
+__MATMUL_EMBEDDED_FILE_14__
+
+cat > "$destination/rtl/tile_c4x4_1dsp.v" <<'__MATMUL_EMBEDDED_FILE_15__'
+`timescale 1ns/1ps
+`default_nettype none
+// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
+
+// ONE C[4x4] tile, ONE multiplier. Each call performs A[4x4]*B[4x4].
+// first_chunk=1: C=A*B; first_chunk=0: C=C+A*B.
+// Two calls complete one C tile of an 8x8 matmul. ACC_W=35 for signed16.
+// Input tiles are packed row-major, element [0,0] in the LSBs.
+module tile_c4x4_1dsp #(
+    parameter integer ELEM_W = 16,
+    parameter integer ACC_W = 2*ELEM_W+3
+) (
+    input wire clk, rst,
+    input wire start,
+    input wire first_chunk,
+    input wire [16*ELEM_W-1:0] a_tile_data, b_tile_data,
+    output wire start_ready, busy,
+    output reg done,
+
+    // Accepted input tiles forwarded from the SAME registers used locally.
+    // One-cycle valid pulse; payload remains held until the next start.
+    output wire [16*ELEM_W-1:0] a_forward_data, b_forward_data,
+    output reg forward_valid,
+
+    // Read one C element while idle. Address = 4*row+column.
+    input wire c_rd_en,
+    input wire [3:0] c_rd_addr,
+    output wire c_rd_ready,
+    output wire signed [ACC_W-1:0] c_rd_data,
+    output reg c_rd_valid
+);
+    localparam integer PROD_W = 2*ELEM_W;
+    localparam [1:0] IDLE = 2'd0, ISSUE = 2'd1, DRAIN = 2'd2;
+    reg [1:0] state;
+    reg [16*ELEM_W-1:0] a_buf, b_buf;
+    reg [5:0] issue_index;
+    reg first_latched, initialized;
+    assign a_forward_data = a_buf;
+    assign b_forward_data = b_buf;
+    wire [1:0] k = issue_index[5:4];
+    wire [3:0] dest = issue_index[3:0];
+    wire [3:0] a_index = {dest[3:2], k}; // 4*row+k
+    wire [3:0] b_index = {k, dest[1:0]}; // 4*k+column
+    wire signed [ELEM_W-1:0] a_value = $signed(a_buf[a_index*ELEM_W +: ELEM_W]);
+    wire signed [ELEM_W-1:0] b_value = $signed(b_buf[b_index*ELEM_W +: ELEM_W]);
+
+    // Block accumulation into uninitialized RAM after reset.
+    assign start_ready = !rst && state == IDLE && (first_chunk || initialized);
+    assign busy = !rst && state != IDLE;
+    wire accept_start = start && start_ready;
+    assign c_rd_ready = !rst && state == IDLE && initialized && !start;
+    wire accept_read = c_rd_en && c_rd_ready;
+    wire issue = !rst && state == ISSUE;
+
+    (* multstyle = "dsp" *) wire signed [PROD_W-1:0] product_comb;
+    reg signed [PROD_W-1:0] product;
+    reg product_valid, product_first;
+    reg [3:0] product_dest;
+    wire signed [ACC_W-1:0] product_extended =
+        {{(ACC_W-PROD_W){product[PROD_W-1]}}, product};
+    assign product_comb = a_value * b_value;
+
+    // 16 partial sums. No memory reset: the first k of first_chunk overwrites
+    // every destination before any old value is used for accumulation.
+    (* ramstyle = "M9K, no_rw_check" *) reg signed [ACC_W-1:0] c_mem [0:15];
+    reg signed [ACC_W-1:0] c_q;
+    wire mem_rd_en = issue || accept_read;
+    wire [3:0] mem_rd_addr = issue ? dest : c_rd_addr;
+    wire mem_wr_en = !rst && product_valid;
+    wire signed [ACC_W-1:0] c_next = product_first ? product_extended : c_q + product_extended;
+    assign c_rd_data = c_q;
+
+    always @(posedge clk) begin
+        if (mem_rd_en) c_q <= c_mem[mem_rd_addr];
+        if (mem_wr_en) c_mem[product_dest] <= c_next;
+    end
+    // Payload registers need no reset; valid/control signals protect them.
+    always @(posedge clk) begin
+        if (accept_start) begin a_buf <= a_tile_data; b_buf <= b_tile_data; end
+        if (issue) product <= product_comb;
+    end
+    always @(posedge clk) begin
+        if (rst) begin
+            state <= IDLE;
+            issue_index <= 6'd0;
+            first_latched <= 1'b0;
+            initialized <= 1'b0;
+            product_valid <= 1'b0;
+            product_first <= 1'b0;
+            product_dest <= 4'd0;
+            c_rd_valid <= 1'b0;
+            done <= 1'b0;
+            forward_valid <= 1'b0;
+        end else begin
+            done <= 1'b0;
+            forward_valid <= accept_start;
+            c_rd_valid <= accept_read;
+            product_valid <= issue;
+            if (issue) begin
+                product_dest <= dest;
+                product_first <= first_latched && k == 2'd0;
+            end
+            case (state)
+                IDLE: if (accept_start) begin
+                    first_latched <= first_chunk;
+                    initialized <= 1'b0;
+                    issue_index <= 6'd0;
+                    state <= ISSUE;
+                end
+                ISSUE: if (issue_index == 6'd63) state <= DRAIN;
+                       else issue_index <= issue_index + 6'd1;
+                DRAIN: if (product_valid) begin
+                    // Last RAM write occurs on this same edge.
+                    initialized <= 1'b1;
+                    done <= 1'b1;
+                    state <= IDLE;
+                end
+                default: state <= IDLE;
+            endcase
+        end
+    end
+endmodule
+`default_nettype wire
+__MATMUL_EMBEDDED_FILE_15__
+
+cat > "$destination/rtl/tile_bram.v" <<'__MATMUL_EMBEDDED_FILE_16__'
+`timescale 1ns/1ps
+`default_nettype none
+// Ported from matmul8x8_4core_tile4x4; Verilog-2001 interface/syntax.
+
+// One 8x8 matrix stored as four 4x4 tiles.
+// tile_id = 2*tile_row + tile_col; each tile is row-major, first element LSB.
+module tile_bram #(
+    parameter integer ELEM_W = 16
+) (
+    input  wire clk,
+    input  wire rst,
+
+    input  wire wr_en,
+    input  wire [1:0] wr_tile_id,
+    input  wire [16*ELEM_W-1:0] wr_tile_data,
+
+    input  wire rd_en,
+    input  wire [1:0] rd_tile_id,
+    output reg [16*ELEM_W-1:0] rd_tile_data,
+    output reg rd_valid
+);
+    localparam integer TILE_W = 16 * ELEM_W;
+
+    // Quartus attribute for Cyclone IV. A wide word can span multiple M9Ks.
+    (* ramstyle = "M9K" *)
+    reg [TILE_W-1:0] mem [0:3];
+
+    always @(posedge clk) begin
+        if (rst) rd_valid <= 1'b0;
+        else     rd_valid <= rd_en;
+    end
+
+    // Reset suppresses accesses; it does not clear the RAM contents.
+    always @(posedge clk) begin
+        if (!rst && wr_en)
+            mem[wr_tile_id] <= wr_tile_data;
+    end
+
+    always @(posedge clk) begin
+        if (!rst && rd_en)
+            rd_tile_data <= mem[rd_tile_id];
+    end
+endmodule
+
+`default_nettype wire
+__MATMUL_EMBEDDED_FILE_16__
+
+printf 'Đã tạo 17 file project tại: %s\n' "$destination"
 printf 'Mở: %s/matmul.qpf (top-level/revision: matmul).\n' "$destination"
 printf 'UART: TX PIN_114/P1.7 -> RX adapter; RX PIN_24/P1.34 <- TX adapter; TTL 3.3 V, GND chung; 9600 8N1.\n'
 printf 'DIP3 OFF: DIP1 phát A; DIP2 nhận 0-9 và hiển thị DIG1. DIP2 ưu tiên hơn DIP1.\n'
@@ -2082,3 +2608,4 @@ printf 'Sau biên dịch, xem output_files/matmul.pin: DIG1=133, segment a=128, 
 printf 'Ví dụ 8x8 để copy/paste: %s/UART_MATRIX_EXAMPLE.md\n' "$destination"
 printf 'Ứng dụng PC: %s/matrix_gui.py (cài requirements-gui.txt; xem README).\n' "$destination"
 printf 'GUI tự đồng bộ khi kết nối; bật DIP3 trước, chờ FPGA READY rồi gửi ma trận.\n'
+printf 'Accelerator: 4 core song song, tile 4x4, Verilog-2001; cần biên dịch và nạp SOF mới.\n'
