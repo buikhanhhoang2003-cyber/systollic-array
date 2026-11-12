@@ -306,4 +306,3 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to gpio
 # Optional TFT, SD-card, OV7670 and 16-bit VGA modules require their own
 # wiring-specific assignments and removal of conflicting onboard assignments.
 # ---------------------------------------------------------------------------
-
