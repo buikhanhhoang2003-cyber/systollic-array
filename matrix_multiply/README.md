@@ -21,6 +21,9 @@ display; turn it on and send a new digit. Turning switch 1 off lets the
 current UART character finish before TX goes idle. Reset clears the display
 and UART state. A short internal reset runs automatically after configuration;
 the RESET button can also be used at any time.
+The switch synchronizer registers initialize to OFF. All four LED outputs
+are registered and initialize to `1111` (off); LED3/LED4 remain high throughout
+operation. These startup assignments apply after the FPGA enters user mode.
 
 ## UART wiring
 
@@ -70,8 +73,12 @@ also agree with `../FPGA-UART-TX/UART_TX.qsf`.
 All I/O uses 3.3-V LVTTL; unused pins remain inputs in high impedance.
 The seven-segment display is common anode with active-low segments and
 digit enables. Only DIG1 is driven, so no multiplexing is necessary.
-The pin template notes that the V2.1 schematic reverses the LED net labels;
-this project follows the vendor pin table's LED1 = pin 87 convention.
+In the V2.1 schematic, LED anodes connect to 3.3 V, so the FPGA must drive
+high to turn them off. The component marked LED1 connects through R30 to
+the net named LED4 (pin 87); the net labels run in the opposite order to
+the physical LEDs. This project follows the vendor pin table's physical
+LED1 = pin 87 convention. KEY1/KEY2 have external pull-ups and close to
+GND, so DIP OFF reads high and DIP ON reads low.
 
 ## Build and try it
 
@@ -84,6 +91,14 @@ this project follows the vendor pin table's LED1 = pin 87 convention.
    lights and `AAAA...` appears. Turn DIP1 OFF to stop the stream.
 6. Turn DIP2 ON: LED2 lights. Type `0` through `9`; DIG1 shows the last
    digit sent. No Enter key is required. Both switches may be ON together.
+
+After changing any HDL or QSF file, compile again and explicitly reload
+the newly generated `output_files/uart_switch_demo.sof` in Programmer.
+Check its path and modification time, then confirm Program/Configure succeeds.
+With all DIP positions OFF and no buttons pressed, the four user LEDs
+must be off. The separate power/configuration indicators are not user LEDs.
+Editing source files alone does not change the program running on the FPGA;
+after a power cycle the configuration flash can reload an older program.
 
 Command-line compilation, when Quartus is on PATH:
 
@@ -105,7 +120,8 @@ vvp /tmp/uart_switch_demo_tb.vvp
 ```
 
 The self-checking testbench uses the real 50 MHz/9600-baud timing. It checks
-power-up without a button press, all four switch/LED combinations, digits
+LEDs off from the first simulation instant without a button press, LED3/LED4
+off throughout the run, all four switch/LED combinations, digits
 0–9 with back-to-back frames, concurrent transmit/receive, ignored non-digits,
 invalid stop/start bits, switching off mid-frame, and reset during TX/RX.
 It passes with Icarus Verilog 11.0; the synthesizable RTL also compiles in
