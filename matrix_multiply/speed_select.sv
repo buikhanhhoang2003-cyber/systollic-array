@@ -49,6 +49,3 @@ always @ (posedge clk or negedge rst_n)
 assign clk_bps = clk_bps_r;
 
 endmodule
-
-
-
